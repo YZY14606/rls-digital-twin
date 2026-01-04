@@ -162,3 +162,9 @@ cython_debug/
 #.idea/
 
 .vscode
+
+models/
+third_part/
+build/
+devel/
+checkpoints/

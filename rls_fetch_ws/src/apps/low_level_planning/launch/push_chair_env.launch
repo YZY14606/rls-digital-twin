@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<launch>
+<!-- Set environment variables -->
+<env name="GAZEBO_MODEL_PATH" value="$(find low_level_planning)/models"/>
+
+<!-- Launch Gazebo with empty world -->
+<include file="$(find gazebo_ros)/launch/empty_world.launch">
+<arg name="verbose" value="true"/>
+</include>
+
+<!-- Set physics parameters for high friction -->
+<rosparam param="/gazebo/ode">
+  solver:
+    type: quick
+    iters: 50
+  constraints:
+    cfm: 0.0
+    erp: 0.2
+    contact_max_correcting_vel: 100.0
+    contact_surface_layer: 0.0
+</rosparam>
+
+<!-- Spawn the environment model -->
+<node name="spawn_environment" pkg="gazebo_ros" type="spawn_model"
+output="screen" respawn="false"
+args="-file $(find low_level_planning)/models/environment.sdf -sdf -model environment"/>
+
+<!-- Launch the Fetch robot -->
+<include file="$(find fetch_gazebo)/launch/include/fetch.launch.xml"/>
+
+
+<!-- Spawn the bottle model -->
+<node name="spawn_bottle_2" pkg="gazebo_ros" type="spawn_model" 
+      output="screen" respawn="false"
+      args="-file $(find low_level_planning)/models/bottle_2/bottle_2.sdf -sdf -model bottle_2
+        -x -3.0 -y 1.5 -z 0.75 
+        -R 0.0 -P 0.0 -Y 0.0 "/>
+
+
+<!-- Compress RGB image -->
+<node name="compress_rgb" pkg="image_transport" type="republish" args="raw in:=/head_camera/rgb/image_raw compressed out:=/head_camera/rgb/image_raw" />
+<node pkg="topic_tools" type="throttle" name="throttle_messages" args="messages /head_camera/rgb/image_raw/compressed 10.0 /throttled_camera/rgb/compressed" />
+
+<!-- Compress Depth image -->
+<node name="compress_depth" pkg="image_transport" type="republish" args="raw in:=/head_camera/depth_registered/image_raw compressedDepth out:=/head_camera/depth/image_raw" />
+<node pkg="topic_tools" type="throttle" name="throttle_messages_depth" args="messages /head_camera/depth/image_raw/compressedDepth 10.0 /throttled_camera/depth/compressedDepth" />
+
+<!-- Launch navigation -->
+<include file="$(find fetch_navigation)/launch/fetch_nav.launch">
+<arg name="map_file" value="$(find low_level_planning)/maps/digital_twin_map.yaml"/>
+<arg name="move_base_include" value="$(find low_level_planning)/launch/include/move_base.launch.xml"/>
+<arg name="amcl_include" value="$(find low_level_planning)/launch/include/amcl.launch.xml"/>
+</include>
+
+
+<node name="rviz" pkg="rviz" type="rviz" args="-d $(find low_level_planning)/rviz/robot_rls_demo.rviz" output="screen"/>
+</launch>
