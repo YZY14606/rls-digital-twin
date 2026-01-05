@@ -472,51 +472,9 @@ def pcd_downsample(points, num_samples=1024):
 
     return points_output
 
-def pointcloud_segmentation_fusion(simulation_control,topic,camera_name_list):
-    all_pointcloud = []
-    pcd_fusion_tool =  Points_fusion_tool()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    for camera_name in camera_name_list:
-        # Get the rgb data of this camera
-        rgb_topic = topic[camera_name][0]
-        depth_topic = topic[camera_name][1]
-        rgb, depth , cam2world, intrinsic_cv = simulation_control.get_rgb_depth(rgb_topic= rgb_topic,depth_topic= depth_topic,camera_name= camera_name)
-        # Get the chair mask
-        green_mask = (rgb[:, :, 1] > 130) & (rgb[:, :, 0] < 60) & (rgb[:, :, 2] < 60)
-        green_points = np.argwhere(green_mask) # shape(N,2)
-        chosen_indices = np.random.choice(len(green_points), size=3, replace=False)
-        # 返回这两个点的位置 (row, col)
-        position = green_points[chosen_indices]
-        labels = np.array([1,1,1])
-        # Use sam2 to get the mask of target object
-        position[:,[0,1]] = position[:,[1,0]]
-        mask_data = generate_segmentation_mask(rgb, position, labels)
-        segmentation = torch.tensor(mask_data).squeeze().to(device)
+def process_object_pointcloud(obstacle_pcds):
 
-        # Add parameters to Points_fusion_tool
-        cam2world_para = torch.tensor(cam2world).view(4,4).to(device).to(torch.float)
-        camera_intrinsic_para = torch.tensor(intrinsic_cv).view(3,3).to(device).to(torch.float)
-        pcd_fusion_tool.cam2world.append(cam2world_para.clone())
-        pcd_fusion_tool.intrinsic.append(camera_intrinsic_para.clone())
-        pcd_fusion_tool.mask.append(segmentation.clone())
-
-        # Acquire the pointcloud in world frame
-        depth_tensor = torch.tensor(depth).squeeze().to(device).clone()
-        points_wld_frame = calculate_object_pointcloud_wld(depth = depth_tensor,intrinsic_cv = camera_intrinsic_para, 
-                                        cam2world = cam2world_para, mask = segmentation)
-        # Filter the points below a hight
-        mask = points_wld_frame[:, 2] >= 0.02
-        filtered_wld_frame_points = points_wld_frame[mask]
-        
-
-        all_pointcloud.append(filtered_wld_frame_points)
-
-    output_pointcloud = torch.cat(all_pointcloud,dim=0)
-    output_pointcloud = pcd_fusion_tool.filter_point(output_pointcloud).cpu().numpy()
-
-
-    if len(output_pointcloud)  > 1024:
-        output_pointcloud = pcd_downsample(output_pointcloud,num_samples=1024)
+    output_pointcloud = pcd_downsample(obstacle_pcds,num_samples=1024)
     return output_pointcloud
 
 
@@ -528,37 +486,49 @@ def calculate_object_pointcloud_wld(depth,intrinsic_cv,cam2world,mask):
     device = depth.device
 
     # Create the pixel grid (u, v)
-    u = torch.arange(W, device= device)
-    v = torch.arange(H, device= device)
+    u = torch.arange(W, device= device, dtype=torch.float32)
+    v = torch.arange(H, device= device, dtype=torch.float32)
     u_grid, v_grid = torch.meshgrid(u, v, indexing='xy')  # (H, W)
 
     # flat and construct pixel coordinate (3, N)
     u_flat = u_grid.reshape(-1)
     v_flat = v_grid.reshape(-1)
     mask_flat = mask.reshape(-1)
-    pixels = torch.stack((u_flat, v_flat, mask_flat), dim=0)  # shape: (3, H*W)
     # flat the depth (N,)
     depth_flat = depth.reshape(-1)  # shape: (H*W,)
 
+    # Only consider pixels with valid depth
+    valid_depth_mask = depth_flat > 0
+    u_valid = u_flat[valid_depth_mask]
+    v_valid = v_flat[valid_depth_mask]
+    d_valid = depth_flat[valid_depth_mask]
+    mask_valid = mask_flat[valid_depth_mask]  # corresponding mask values for valid depth pixels
+
+    # Homogeneous pixel coords
+    ones = torch.ones_like(u_valid)
+    pixels = torch.stack([u_valid, v_valid, ones], dim=0)  # (3, M)
+
     # K^-1
     K_inv = torch.inverse(intrinsic_cv.to(torch.float32))
-    # Calculate X_cam = d * (K^-1 @ [u, v, 1])
-    cam_points = ((K_inv @ pixels) * depth_flat).T  # shape: (H*W,3)
+    cam_points = (K_inv @ pixels) * d_valid  # (3, M)
+    cam_points = cam_points.T  # (M, 3)
 
-    # Filter the segmented points
-    mask = cam_points[..., 2] != 0  # 获取 w≠0 的掩码，形状 [1, N]
-    filtered_xyz = cam_points[mask]  # 过滤后形状 [M, 3]，其中 M 是有效点数
-
-    # Get the augmented points
-    ones = torch.ones(filtered_xyz.shape[0],device=device).view(-1,1)
-    augmented_cam_points = torch.cat([filtered_xyz,ones],dim=1)
-
-    # Convert the points to the world frame
-    points_wld_frame_augmented = (cam2world @ augmented_cam_points.T).T
-    final_points = points_wld_frame_augmented[:,:3]
+    # Transform to world coordinates
+    ones_aug = torch.ones(cam_points.shape[0], 1, device=device)
+    cam_points_h = torch.cat([cam_points, ones_aug], dim=1)  # (M, 4)
+    world_points_h = (cam2world @ cam_points_h.T).T  # (M, 4)
+    world_points = world_points_h[:, :3]  # (M, 3)
 
 
-    return final_points
+    # Split based on mask
+    masked_mask = mask_valid.bool()
+    unmasked_mask = ~masked_mask
+
+    masked_points = world_points[masked_mask]
+    unmasked_points = world_points[unmasked_mask]
+
+
+    return masked_points,unmasked_points
 
 
 #得到物体坐标系下的表面点
@@ -737,10 +707,10 @@ def convert_action_use(ps_pose,pe_pose,robot_theta_y):
 
 
     # 进行ps与pe高度的判断，防止与桌面过度碰撞
-    if ps_pose[2]<0.02:
-        ps_pose[2] = 0.02
-    if pe_pose[2]<0.02:
-        pe_pose[2] = 0.02
+    if ps_pose[2]< 0.74:
+        ps_pose[2] = 0.75
+    if pe_pose[2]< 0.74:
+        pe_pose[2] = 0.75
 
     return ps_pose ,pe_pose
 
@@ -933,7 +903,7 @@ def collect_and_segmented_pcd(simulation_control,topic,fetch):
     cv2.imshow("Segmentation Overlay", output_bgr)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
-
+    print(cam2world)
     # Add parameters to Points_fusion_tool
     cam2world_para = torch.tensor(cam2world).view(4,4).to(device).to(torch.float)
     camera_intrinsic_para = torch.tensor(intrinsic_cv).view(3,3).to(device).to(torch.float)
@@ -943,10 +913,16 @@ def collect_and_segmented_pcd(simulation_control,topic,fetch):
 
     # Acquire the pointcloud in world frame
     depth_tensor = torch.tensor(depth).squeeze().to(device).clone()
-    points_wld_frame = calculate_object_pointcloud_wld(depth = depth_tensor,intrinsic_cv = camera_intrinsic_para, 
+    obj_pcd_wld_frame,obstacle_pcd_wld_frame = calculate_object_pointcloud_wld(depth = depth_tensor,intrinsic_cv = camera_intrinsic_para, 
                                     cam2world = cam2world_para, mask = segmentation)
-    # # Filter the points below a hight; to be determined
-    # mask = points_wld_frame[:, 2] >= 0.02
-    # filtered_wld_frame_points = points_wld_frame[mask]
+    # Filter the object-points below a hight (The height of the table);
+    mask = obj_pcd_wld_frame[:, 2] >= 0.735
+    filtered_wld_frame_points = obj_pcd_wld_frame[mask]
 
-    return points_wld_frame.cpu().numpy()
+    # Filter the obstacle-points;
+    mask = obstacle_pcd_wld_frame[:, 2] >= 0.75
+    filtered_obstacle_pcd_wld_frame = obstacle_pcd_wld_frame[mask]
+
+
+
+    return filtered_wld_frame_points.cpu().numpy(), filtered_obstacle_pcd_wld_frame.cpu().numpy()

@@ -3,7 +3,7 @@ import rospy
 import numpy as np
 import vamp
 import actionlib
-from sensor_msgs.msg import JointState, PointCloud2, PointField
+from sensor_msgs.msg import JointState, PointCloud2, PointField, CameraInfo
 from sensor_msgs import point_cloud2
 from geometry_msgs.msg import Twist, PoseStamped
 from control_msgs.msg import (
@@ -22,7 +22,8 @@ from fetch.utils.control_utils import HeadController
 from std_msgs.msg import Bool, Header
 import fetch.utils.whole_body_ik_utils as ik_utils
 import fetch.utils.replanning_utils as replanning_utils
-
+import cv2
+import struct
 
 class Fetch:
     """
@@ -35,6 +36,25 @@ class Fetch:
             rospy.init_node("fetch_controller", anonymous=True)
         except rospy.exceptions.ROSException:
             print("Node has already been initialized, do nothing")
+
+        # For camera data
+        self.latest_rgb = None
+        self.latest_depth = None
+        self.camera_intrinsics = None
+
+        # Head Action Client
+        self.head_traj_client = actionlib.SimpleActionClient(
+            "head_controller/follow_joint_trajectory", FollowJointTrajectoryAction
+        )
+        rospy.loginfo("Waiting for head controller action server...")
+        self.head_traj_client.wait_for_server()
+
+        self.info_sub = rospy.Subscriber(
+            "/head_camera/rgb/camera_info",
+            CameraInfo,
+            self._info_callback,
+            queue_size=1,
+        )
 
         # Add joint states subscriber
         self.joint_states = None
@@ -138,6 +158,92 @@ class Fetch:
         self.pointcloud_publisher = rospy.Publisher(
             "/debug_pointcloud", PointCloud2, queue_size=1
         )
+
+
+
+    def move_head(self, pan, tilt, duration=1.0):
+        # Compute current head positions
+        name_to_pos = dict(zip(self.joint_states.name, self.joint_states.position))
+        start_pan = name_to_pos[self.head_joint_names[0]]
+        start_tilt = name_to_pos[self.head_joint_names[1]]
+
+        # Auto time-scale based on delta and a simple max velocity
+        # Keep it simple: linear interpolation with fixed rate
+        default_max_vel = 1.0  # rad/s
+        delta_pan = pan - start_pan
+        delta_tilt = tilt - start_tilt
+        max_delta = max(abs(delta_pan), abs(delta_tilt))
+        min_time = max_delta / default_max_vel if max_delta > 1e-6 else 0.2
+        total_time = max(duration, min_time)
+
+        rate_hz = 30
+        num_points = max(int(total_time * rate_hz), 10)
+        dt = total_time / num_points
+
+        goal = FollowJointTrajectoryGoal()
+        trajectory = JointTrajectory()
+        trajectory.joint_names = self.head_joint_names
+
+        for i in range(1, num_points + 1):
+            alpha = i / num_points
+            pos_pan = start_pan + alpha * delta_pan
+            pos_tilt = start_tilt + alpha * delta_tilt
+
+            point = JointTrajectoryPoint()
+            point.positions = [pos_pan, pos_tilt]
+            point.time_from_start = rospy.Duration(i * dt)
+            trajectory.points.append(point)
+
+        goal.trajectory = trajectory
+
+        self.head_traj_client.send_goal(goal)
+
+
+
+
+    def get_rgb(self):
+        rospy.sleep(0.1)
+        return self.latest_rgb
+
+    def get_depth(self):
+        rospy.sleep(0.1)
+        return self.latest_depth
+
+    def get_camera_intrinsics(self):
+        return self.camera_intrinsics
+
+
+    def _rgb_callback(self, msg):
+        str_msg = msg.data
+        buf = np.ndarray(shape=(1, len(str_msg)), dtype=np.uint8, buffer=msg.data)
+        cv_image = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        self.latest_rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+
+    def _depth_callback(self, msg):
+        depth_fmt, compr_type = msg.format.split(";")
+        depth_fmt = depth_fmt.strip()
+        compr_type = compr_type.strip()
+        depth_header_size = 12
+        raw_data = msg.data[depth_header_size:]
+        depth_img_raw = cv2.imdecode(
+            np.frombuffer(raw_data, np.uint8), cv2.IMREAD_UNCHANGED
+        )
+        if depth_fmt == "16UC1":
+            self.latest_depth = depth_img_raw.astype(np.float32) / 1000.0
+        elif depth_fmt == "32FC1":
+            raw_header = msg.data[:depth_header_size]
+            [compfmt, depthQuantA, depthQuantB] = struct.unpack("iff", raw_header)
+            depth_img_scaled = depthQuantA / (
+                depth_img_raw.astype(np.float32) - depthQuantB
+            )
+            depth_img_scaled[depth_img_raw == 0] = 0
+            self.latest_depth = depth_img_scaled
+        self.latest_depth = np.nan_to_num(self.latest_depth)
+
+
+    def _info_callback(self, msg):
+        if self.camera_intrinsics is None:
+            self.camera_intrinsics = np.array(msg.K).reshape(3, 3)
 
     def solve_whole_body_ik(
         self, target_pose, max_attempts=100, manipulation_radius=1.0, normalized_arm_seed=None
@@ -1467,16 +1573,16 @@ class Fetch:
 
         return self.gripper_client.get_result()
 
-    def move_head(self, pan, tilt, duration=1.0):
-        """
-        Moves the robot's head to a given pan and tilt position.
+    # def move_head(self, pan, tilt, duration=1.0):
+    #     """
+    #     Moves the robot's head to a given pan and tilt position.
 
-        Args:
-            pan (float): The target pan position for the head.
-            tilt (float): The target tilt position for the head.
-            duration (float): The duration of the movement in seconds.
-        """
-        self.head_controller.move_head(pan, tilt, duration)
+    #     Args:
+    #         pan (float): The target pan position for the head.
+    #         tilt (float): The target tilt position for the head.
+    #         duration (float): The duration of the movement in seconds.
+    #     """
+    #     self.head_controller.move_head(pan, tilt, duration)
 
     def point_head_at(self, target_point, frame_id="map", duration=1.0):
         """

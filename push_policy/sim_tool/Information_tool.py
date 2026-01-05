@@ -99,6 +99,7 @@ class  SimController:
         # cv2.imshow('Depth Image', depth_display)
         # cv2.waitKey(0)  # 按任意键关闭窗口
         # cv2.destroyAllWindows()
+        # print(depth)
 
         # Get the extrinsic_cv of the camera_1 in world frame
         position = camera_pose[:3,3]

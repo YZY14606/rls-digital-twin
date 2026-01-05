@@ -33,7 +33,7 @@ args="-file $(find low_level_planning)/models/environment.sdf -sdf -model enviro
 <node name="spawn_bottle_2" pkg="gazebo_ros" type="spawn_model" 
       output="screen" respawn="false"
       args="-file $(find low_level_planning)/models/bottle_2/bottle_2.sdf -sdf -model bottle_2
-        -x -3.0 -y 1.5 -z 0.75 
+        -x -3.0 -y 1.5 -z 0.8 
         -R 0.0 -P 0.0 -Y 0.0 "/>
 
 
