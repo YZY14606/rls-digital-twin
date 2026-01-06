@@ -25,6 +25,11 @@ import fetch.utils.replanning_utils as replanning_utils
 import cv2
 import struct
 
+from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Slerp
+
+from fetch.grasp_utils.trac_api import trac_solve_fixed_base_arm
+
 class Fetch:
     """
     Core class for controlling the Fetch robot.
@@ -41,6 +46,15 @@ class Fetch:
         self.latest_rgb = None
         self.latest_depth = None
         self.camera_intrinsics = None
+
+        # Collect picture info when executing actions
+        self.rgb_list = []
+        self.depth_list = []
+        self.intrinsics_list = []
+        self.camera_pose_list = []
+
+        # Set camera info collect sigin
+        self.collect_camera_data = False
 
         # Head Action Client
         self.head_traj_client = actionlib.SimpleActionClient(
@@ -159,7 +173,198 @@ class Fetch:
             "/debug_pointcloud", PointCloud2, queue_size=1
         )
 
+    def collect_images_info(self):
+        rgb = self.latest_rgb.copy()
+        depth = self.latest_depth.copy()
+        intrinsic = self.camera_intrinsics.copy()
+        camera_pose = self.get_camera_pose()
+        self.rgb_list.append(rgb)
+        self.depth_list.append(depth)
+        self.intrinsics_list.append(intrinsic)
+        self.camera_pose_list.append(camera_pose)
 
+    def clear_images_info_list(self):
+        self.rgb_list = []
+        self.depth_list = []
+        self.intrinsics_list = []
+        self.camera_pose_list = []
+
+
+    def send_cartesian_interpolated_motion(
+        self, target_ee_pos, target_ee_quat, duration=3.0, num_waypoints=5
+    ):
+        """
+        Move to target end-effector pose via Cartesian interpolation mapped to joint space.
+
+        This method:
+        1. Interpolates in Cartesian space
+        2. Uses TRAC-IK with progressive seeding to map each waypoint to joint space
+        3. Sends the joint trajectory to the trajectory controller (accurate & fast)
+
+        This avoids joint wrapping issues and ensures smooth Cartesian paths.
+
+        Args:
+            target_ee_pos: Target end-effector position [x, y, z] in world frame.
+            target_ee_quat: Target end-effector orientation [x, y, z, w] quaternion in world frame.
+            duration: Time to execute trajectory (default: 3.0s)
+            num_waypoints: Number of Cartesian waypoints to generate (default: 20)
+
+        Returns:
+            Result from action client, or None on failure
+        """
+
+        # Get current state
+        current_torso = self.get_torso_position()
+        current_arm_joints = self.get_arm_joint_values()
+        base_config = self.get_base_params()
+
+        # Compute current end-effector pose
+        current_full_config = [current_torso] + current_arm_joints
+
+        # Get EE pose in robot base frame from FK
+        current_ee_pos_base, current_ee_quat_base = self.vamp_module.eefk(
+            current_full_config
+        )
+
+        # Transform current EE pose to world frame
+        (
+            current_ee_pos_world,
+            current_ee_quat_world,
+        ) = transform_utils.transform_pose_to_world(
+            [base_config[0], base_config[1], 0],
+            base_config[2],
+            current_ee_pos_base,
+            current_ee_quat_base,
+        )
+
+        target_ee_pos_world = target_ee_pos
+        target_ee_quat_world = target_ee_quat
+
+        # Create SLERP interpolator for orientation
+        key_rots = R.from_quat([current_ee_quat_world, target_ee_quat_world])
+        key_times = [0, 1]
+        slerp = Slerp(key_times, key_rots)
+
+        # Generate interpolated Cartesian waypoints
+        alphas = np.linspace(0, 1, num_waypoints)
+        joint_trajectory = []
+        seed = current_full_config  # Progressive seeding for smooth IK solutions (includes torso)
+
+        for i, alpha in enumerate(alphas):
+            # Interpolate position (linear) and orientation (SLERP)
+            interp_pos = (1 - alpha) * np.array(
+                current_ee_pos_world
+            ) + alpha * np.array(target_ee_pos_world)
+            interp_rot = slerp(alpha)
+            interp_quat = interp_rot.as_quat()
+
+            # Solve IK with progressive seeding (each solution seeds the next)
+            # Use fixed_base_arm solver which includes torso (8-DOF)
+            ik_solution = trac_solve_fixed_base_arm(
+                seed,
+                base_config,
+                interp_pos.tolist(),
+                interp_quat.tolist(),
+            )
+
+            if ik_solution is None:
+                print(
+                    f"IK failed at waypoint {i}/{num_waypoints} (alpha={alpha:.3f})"
+                )
+                return None
+
+            # Add the full 8-DOF configuration (torso + arm joints) to trajectory
+            joint_trajectory.append(ik_solution)
+
+            # Update seed for next iteration (progressive seeding)
+            seed = ik_solution
+
+        # Execute trajectory
+        return self.execute_joint_trajectory(joint_trajectory, duration)
+
+
+
+    def execute_joint_trajectory(self, trajectory_points, duration):
+        # Split trajectory for torso and arm
+        torso_points = [[point[0]] for point in trajectory_points]
+        arm_points = [point[1:] for point in trajectory_points]
+
+        # Create torso trajectory
+        torso_goal = FollowJointTrajectoryGoal()
+        torso_goal.trajectory = JointTrajectory()
+        torso_goal.trajectory.joint_names = ["torso_lift_joint"]
+
+        # Create arm trajectory
+        arm_goal = FollowJointTrajectoryGoal()
+        arm_goal.trajectory = JointTrajectory()
+        arm_goal.trajectory.joint_names = [
+            "shoulder_pan_joint",
+            "shoulder_lift_joint",
+            "upperarm_roll_joint",
+            "elbow_flex_joint",
+            "forearm_roll_joint",
+            "wrist_flex_joint",
+            "wrist_roll_joint",
+        ]
+
+        # Add trajectory points with timing
+        point_duration = duration / len(trajectory_points)
+        for i in range(len(trajectory_points)):
+            # Torso trajectory point
+            torso_point = JointTrajectoryPoint()
+            torso_point.positions = torso_points[i]
+            torso_point.time_from_start = rospy.Duration(point_duration * (i + 1))
+            torso_goal.trajectory.points.append(torso_point)
+
+            # Arm trajectory point
+            arm_point = JointTrajectoryPoint()
+            arm_point.positions = arm_points[i]
+            arm_point.time_from_start = rospy.Duration(point_duration * (i + 1))
+            arm_goal.trajectory.points.append(arm_point)
+
+        # Execute trajectories
+        print(f"Executing trajectory with {len(trajectory_points)} waypoints...")
+
+        # Send goals to both controllers
+        self.torso_client.send_goal(torso_goal)
+        self.arm_traj_client.send_goal(arm_goal)
+
+        # # Wait for completion
+        # timeout = rospy.Duration(duration + 5.0)
+        # torso_success = self.torso_client.wait_for_result(timeout)
+        # arm_success = self.arm_traj_client.wait_for_result(timeout)
+
+        while not self.execution_finished and not rospy.is_shutdown():
+            if self.collect_camera_data:
+                self.collect_images_info()
+            rospy.sleep(0.1)
+
+
+        # if torso_success and arm_success:
+        #     print(
+        #         "Cartesian interpolated trajectory execution completed successfully"
+        #     )
+        #     return self.arm_traj_client.get_result()
+        # else:
+        #     print("Trajectory execution failed or timed out")
+        #     if not torso_success:
+        #         print(
+        #             f"Torso controller failed with state: {self.torso_client.get_state()}"
+        #         )
+        #     if not arm_success:
+        #         print(
+        #             f"Arm controller failed with state: {self.arm_traj_client.get_state()}"
+        #         )
+        #     return None
+
+        if self.execution_finished:
+            print(
+                "Cartesian interpolated trajectory execution completed successfully"
+            )
+            return self.arm_traj_client.get_result()
+        else:
+            print("Trajectory execution failed or timed out")
+            return None
 
     def move_head(self, pan, tilt, duration=1.0):
         # Compute current head positions
@@ -197,8 +402,6 @@ class Fetch:
         goal.trajectory = trajectory
 
         self.head_traj_client.send_goal(goal)
-
-
 
 
     def get_rgb(self):
@@ -937,6 +1140,8 @@ class Fetch:
                 "Whole body motion execution started, waiting for completion signal..."
             )
             while not self.execution_finished and not rospy.is_shutdown():
+                if self.collect_camera_data:
+                    self.collect_images_info()
                 rospy.sleep(0.1)
 
             if self.execution_finished:

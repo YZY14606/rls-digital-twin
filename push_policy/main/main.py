@@ -4,7 +4,7 @@ import os
 from transforms3d.euler import euler2quat, mat2euler
 from main_utils import (process_object_pointcloud,build_local_frame,First_path_plan,plan_from_waypoint,get_future_pose,get_current_pc_future_pose,
                         two_perp_poses_radius2,generate_action,convert_action_use,evaluate_complete_action,test_fetch_motion_plan,move_base_to_target,
-                        collect_and_segmented_pcd)
+                        collect_and_segmented_pcd,test_cartesian_interpolated_motion)
 from pose_estimate.pose_estimator import Pose_Estimator
 import torch
 from sim_tool.Information_tool import SimController
@@ -183,7 +183,7 @@ def main():
                 continue
             # 让机械臂移动到pe
             goal_pose = pe_pose.copy()
-            now_current_state,result = test_fetch_motion_plan(fetch = fetch, current_state = now_current_state, target_pose = pe_pose)
+            now_current_state,result = test_cartesian_interpolated_motion(fetch= fetch, current_state = current_state,target_ee_pose = goal_pose)
             bi_level_plan_results.append(result)
             if result == None:
                 path_point_index = 2
@@ -204,11 +204,21 @@ def main():
 
         # 首先让机械臂移动到ps
         ps_pose_1 = ps_pose.copy()
+        fetch.collect_camera_data = True
         state = fetch.move_to_pose(target_pose = ps_pose_1)
         # 让机械臂移动到pe
-        state = fetch.move_to_pose(target_pose = pe_pose)
+        state = fetch.send_cartesian_interpolated_motion(target_ee_pos = pe_pose[:3], target_ee_quat = pe_pose[3:])
         # 让机械臂移动到ps
         state = fetch.move_to_pose(target_pose = ps_pose_1)
+
+        # 进行收集的图像的处理
+        fetch.collect_camera_data = False
+        rgb_list = fetch.rgb_list
+        depth_list = fetch.depth_list
+        intrinsics_list = fetch.intrinsics_list
+        camera_pose_list = fetch.camera_pose_list
+        # Clear the image lists
+        fetch.clear_images_info_list()
 
         # Record the original object's pointcloud and pose for final evaluation
         if itr_plan == 1:

@@ -22,9 +22,12 @@ import object_planner_py as opp
 from shapely.geometry import Polygon
 from segmentation.segmentation import Segmentation_tool, Points_fusion_tool
 from chamferdist import ChamferDistance
+import fetch.utils.transform_utils as transform_utils
 
+from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Slerp
 
-
+from fetch.grasp_utils.trac_api import trac_solve_fixed_base_arm
 
 # 对于观测的点云，构建局部坐标系
 def build_local_frame(points):
@@ -811,6 +814,96 @@ def test_fetch_motion_plan(fetch,current_state,target_pose):
     last_state['current_base'] = plan_result['base_configs'][-1]
 
     return last_state, plan_result
+
+
+def test_cartesian_interpolated_motion(fetch,current_state ,target_ee_pose, duration=3.0, num_waypoints=5):
+    """
+    Move to target end-effector pose via Cartesian interpolation mapped to joint space.
+
+    This method:
+    1. Interpolates in Cartesian space
+    2. Uses TRAC-IK with progressive seeding to map each waypoint to joint space
+    3. Sends the joint trajectory to the trajectory controller (accurate & fast)
+
+    This avoids joint wrapping issues and ensures smooth Cartesian paths.
+
+    Args:
+        target_ee_pos: Target end-effector position [x, y, z] in world frame.
+        target_ee_quat: Target end-effector orientation [x, y, z, w] quaternion in world frame.
+        duration: Time to execute trajectory (default: 3.0s)
+        num_waypoints: Number of Cartesian waypoints to generate (default: 20)
+
+    Returns:
+        Result from action client, or None on failure
+    """
+
+    # Get current state
+    base_config = current_state['current_base']
+    # Compute current end-effector pose
+    current_full_config = current_state['current_joints']
+
+    # Get EE pose in robot base frame from FK
+    current_ee_pos_base, current_ee_quat_base = fetch.vamp_module.eefk(
+        current_full_config
+    )
+
+    # Transform current EE pose to world frame
+    (
+        current_ee_pos_world,
+        current_ee_quat_world,
+    ) = transform_utils.transform_pose_to_world(
+        [base_config[0], base_config[1], 0],
+        base_config[2],
+        current_ee_pos_base,
+        current_ee_quat_base,
+    )
+
+    target_ee_pos_world = target_ee_pose[:3]
+    target_ee_quat_world = target_ee_pose[3:]
+
+    # Create SLERP interpolator for orientation
+    key_rots = R.from_quat([current_ee_quat_world, target_ee_quat_world])
+    key_times = [0, 1]
+    slerp = Slerp(key_times, key_rots)
+
+    # Generate interpolated Cartesian waypoints
+    alphas = np.linspace(0, 1, num_waypoints)
+    joint_trajectory = []
+    seed = current_full_config  # Progressive seeding for smooth IK solutions (includes torso)
+
+    for i, alpha in enumerate(alphas):
+        # Interpolate position (linear) and orientation (SLERP)
+        interp_pos = (1 - alpha) * np.array(
+            current_ee_pos_world
+        ) + alpha * np.array(target_ee_pos_world)
+        interp_rot = slerp(alpha)
+        interp_quat = interp_rot.as_quat()
+
+        # Solve IK with progressive seeding (each solution seeds the next)
+        # Use fixed_base_arm solver which includes torso (8-DOF)
+        ik_solution = trac_solve_fixed_base_arm(
+            seed,
+            base_config,
+            interp_pos.tolist(),
+            interp_quat.tolist(),
+        )
+
+        if ik_solution is None:
+            print(
+                f"IK failed at waypoint {i}/{num_waypoints} (alpha={alpha:.3f})"
+            )
+            return None
+
+        # Add the full 8-DOF configuration (torso + arm joints) to trajectory
+        joint_trajectory.append(ik_solution)
+
+        # Update seed for next iteration (progressive seeding)
+        seed = ik_solution
+
+    # To be processed; YZY
+
+    return joint_trajectory
+
 
 def move_base_to_target(fetch,target_base_pose):
     # Get current joints configuration
