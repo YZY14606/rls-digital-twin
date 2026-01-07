@@ -40,9 +40,9 @@ def seg_object_in_image(self, image, show=True):
     labels = [[[1] * len(pos_points) + [0] * len(neg_points or [])]]
 
     inputs = self.image_processor(
-        images=image, 
-        input_points=points, 
-        input_labels=labels, 
+        images=image,
+        input_points=points,
+        input_labels=labels,
         return_tensors="pt",
     ).to(self.device)
 

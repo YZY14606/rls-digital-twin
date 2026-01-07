@@ -301,19 +301,22 @@ def First_path_plan(target_pose,object_pose,object_wrld_frame_pcd,
 
     # Change the obstacle's size, and replan
     for obstacle_buff_len in obstacle_buff_len_list:
-        # Get obstacle information for path planning
-        obstacle_index = env.obstacle_index
-        obstacle_pointcloud = []
-        for index in obstacle_index:
-            obstacle_mesh = env.obstacle_dic[index].get_collision_meshes()[0]
-            pointcloud = get_obstacel_pointcloud(obstacle_mesh, buff_len = obstacle_buff_len)
-            obstacle_pointcloud.append(pointcloud)
-        if len(obstacle_pointcloud) != 0:
-            all_obstacle_pointcloud = np.concatenate(obstacle_pointcloud, axis=0)
-        else:
-            center = np.array([-0.615,0,0])
-            radius = 0.23 + obstacle_buff_len
-            all_obstacle_pointcloud = generate_circle_point_cloud(center, radius, num_points = 100)
+        # # Get obstacle information for path planning
+        # obstacle_index = env.obstacle_index
+        # obstacle_pointcloud = []
+        # for index in obstacle_index:
+        #     obstacle_mesh = env.obstacle_dic[index].get_collision_meshes()[0]
+        #     pointcloud = get_obstacel_pointcloud(obstacle_mesh, buff_len = obstacle_buff_len)
+        #     obstacle_pointcloud.append(pointcloud)
+        # if len(obstacle_pointcloud) != 0:
+        #     all_obstacle_pointcloud = np.concatenate(obstacle_pointcloud, axis=0)
+        # else:
+        #     center = np.array([-0.615,0,0])
+        #     radius = 0.23 + obstacle_buff_len
+        #     all_obstacle_pointcloud = generate_circle_point_cloud(center, radius, num_points = 100)
+
+        # Set obstacle pointcloud 
+        all_obstacle_pointcloud = np.array([10,0,0]).reshape(-1,3)
 
         # Get scene data
         scene_dic = dict()

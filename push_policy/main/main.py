@@ -16,12 +16,12 @@ import open3d as o3d
 
 def main():
     # Set target information
-    target_xy = np.array([3.0,2.0])
+    target_xyz = np.array([3.0,2.0,0.0])
     target_quat = np.array(euler2quat(0,0,np.pi/2))
-    target_pose = np.concatenate([target_xy,target_quat],axis=0)
+    target_pose = np.concatenate([target_xyz,target_quat],axis=0)
 
     # Set object original pose (It should be same with the real world pose.)
-    original_pose = np.array([0,0,0,1,0,0,0])
+    original_pose = np.array([-3.0,1.5,0.8,1,0,0,0])
 
     # Set the single push parameter
     push_step_dict = dict()
@@ -47,7 +47,7 @@ def main():
 
     # Record the times of pushing
     itr_plan = 0
-    traj_id = 0
+    traj_id = '0'
     file_name = 'test_yzy'
 
     # 进行机器人初始的信息采集(从三个视角获取物体与环境点云),i以及设定初始操作pose
@@ -61,42 +61,43 @@ def main():
     # euler = mat2euler(camera_pose[:3,:3])
     # print(euler)
 
-    object_pcd_list = []
-    obstacle_pcd_list = []
-    for key in range(3): 
-        target_base_pose = robot_base_pose[key]
-        position = [target_base_pose[0],target_base_pose[1],0]
-        orientation_wxyz = euler2quat(0,0,target_base_pose[2])
-        orientation_xyzw = [orientation_wxyz[1],orientation_wxyz[2],orientation_wxyz[3],orientation_wxyz[0]]
-        fetch.send_target_position(position,orientation_xyzw)
-        rospy.sleep(0.5)  # Wait between movements
-        fetch.move_head(pan = 0.0, tilt = 0.0, duration=1.0)
-        # move_base_to_target(fetch=fetch,target_base_pose=target_base_pose)
-        # rospy.sleep(0.5)  # Wait between movements
-        topic = ['/head_camera/rgb/image_raw','/head_camera/depth_registered/image_raw','/head_camera/rgb/camera_info']
-        obj_pcd_wld_frame, obstacle_pcd_wld_frame = collect_and_segmented_pcd(simulation_control = simulation_control,topic = topic,fetch = fetch)
-        object_pcd_list.append(obj_pcd_wld_frame)
-        obstacle_pcd_list.append(obstacle_pcd_wld_frame)
+    # 注释掉，为了方便后续的调试
+    # object_pcd_list = []
+    # obstacle_pcd_list = []
+    # for key in range(3): 
+    #     target_base_pose = robot_base_pose[key]
+    #     position = [target_base_pose[0],target_base_pose[1],0]
+    #     orientation_wxyz = euler2quat(0,0,target_base_pose[2])
+    #     orientation_xyzw = [orientation_wxyz[1],orientation_wxyz[2],orientation_wxyz[3],orientation_wxyz[0]]
+    #     fetch.send_target_position(position,orientation_xyzw)
+    #     rospy.sleep(0.5)  # Wait between movements
+    #     fetch.move_head(pan = 0.0, tilt = 0.0, duration=1.0)
+    #     # move_base_to_target(fetch=fetch,target_base_pose=target_base_pose)
+    #     # rospy.sleep(0.5)  # Wait between movements
+    #     topic = ['/head_camera/rgb/image_raw','/head_camera/depth_registered/image_raw','/head_camera/rgb/camera_info']
+    #     obj_pcd_wld_frame, obstacle_pcd_wld_frame = collect_and_segmented_pcd(simulation_control = simulation_control,topic = topic,fetch = fetch)
+    #     object_pcd_list.append(obj_pcd_wld_frame)
+    #     obstacle_pcd_list.append(obstacle_pcd_wld_frame)
 
-    object_pcds = np.concatenate(object_pcd_list,axis=0)
-    obstacle_pcds = np.concatenate(obstacle_pcd_list,axis=0)
-    print(object_pcds.shape)
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(object_pcds)
-    o3d.visualization.draw_geometries([pcd])
-    print("Point cloud bounds:")
-    print("Min:", object_pcds.min(axis=0))
-    print("Max:", object_pcds.max(axis=0))
-    print("Center:", object_pcds.mean(axis=0))
+    # object_pcds = np.concatenate(object_pcd_list,axis=0)
+    # obstacle_pcds = np.concatenate(obstacle_pcd_list,axis=0)
+    # print(object_pcds.shape)
+    # pcd = o3d.geometry.PointCloud()
+    # pcd.points = o3d.utility.Vector3dVector(object_pcds)
+    # o3d.visualization.draw_geometries([pcd])
+    # print("Point cloud bounds:")
+    # print("Min:", object_pcds.min(axis=0))
+    # print("Max:", object_pcds.max(axis=0))
+    # print("Center:", object_pcds.mean(axis=0))
 
-    print(obstacle_pcds.shape)
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(obstacle_pcds)
-    o3d.visualization.draw_geometries([pcd])
-    print("Point cloud bounds:")
-    print("Min:", obstacle_pcds.min(axis=0))
-    print("Max:", obstacle_pcds.max(axis=0))
-    print("Center:", obstacle_pcds.mean(axis=0))
+    # print(obstacle_pcds.shape)
+    # pcd = o3d.geometry.PointCloud()
+    # pcd.points = o3d.utility.Vector3dVector(obstacle_pcds)
+    # o3d.visualization.draw_geometries([pcd])
+    # print("Point cloud bounds:")
+    # print("Min:", obstacle_pcds.min(axis=0))
+    # print("Max:", obstacle_pcds.max(axis=0))
+    # print("Center:", obstacle_pcds.mean(axis=0))
 
     # Move fetch to manipulation pose
     manipulation_pose = robot_base_pose[3]
@@ -104,14 +105,21 @@ def main():
     orientation_wxyz = euler2quat(0,0,manipulation_pose[2])
     orientation_xyzw = [orientation_wxyz[1],orientation_wxyz[2],orientation_wxyz[3],orientation_wxyz[0]]
     fetch.send_target_position(position,orientation_xyzw)
+    rospy.sleep(0.5)  # Wait between movements
+    fetch.move_head(pan = 0.0, tilt = 0.0, duration=1.0)
+    rospy.sleep(0.5)  # Wait between movem
 
+    # get object pointcloud for test: YZY
+    topic = ['/head_camera/rgb/image_raw','/head_camera/depth_registered/image_raw','/head_camera/rgb/camera_info']
+    object_pcds, obstacle_pcd_wld_frame = collect_and_segmented_pcd(simulation_control = simulation_control,topic = topic,fetch = fetch)
 
+    path_point_index = 1
     # 进行15次循环，如果机器人在25个循环内完成目标，就算成功
     for i in range(25):
         itr_plan = itr_plan +1
         print(f"This is the {itr_plan} push.")
 
-        object_wrld_frame_pcd = process_object_pointcloud(obstacle_pcds)
+        object_wrld_frame_pcd = process_object_pointcloud(object_pcds)
         # visulize_pointcloud(object_points_wld)
 
         # Construct local frame
@@ -119,14 +127,13 @@ def main():
 
         if itr_plan == 1:
             # Define a object pose estimator
-            pose_estimator = Pose_Estimator(source_pcd_wld = object_wrld_frame_pcd, ori_pose = original_pose.clone().cpu().numpy(),
+            pose_estimator = Pose_Estimator(source_pcd_wld = object_wrld_frame_pcd, ori_pose = original_pose,
                                             original_PCA_frame_pose = local_frame_pose)
-            object_pose = original_pose.clone()
+            object_pose = torch.tensor(original_pose)
             object_pose[2] = 0
         else:
             object_pose = pose_estimator.estimate_object_pose(now_pointcloud = object_wrld_frame_pcd,local_frame_pose = local_frame_pose)
             object_pose = torch.tensor(object_pose)
-
 
         loop_times = 0
         while True:

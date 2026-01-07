@@ -2,11 +2,11 @@ import cv2
 import os
 import numpy as np
 import torch
-from sam2.build_sam import build_sam2
+from sam2.build_sam import build_sam2, build_sam2_video_predictor
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 import time
 import matplotlib.pyplot as plt
-
+from segmentation.seg_utils import PointSelector
 
 
 class Segmentation_tool():
@@ -44,7 +44,73 @@ class Segmentation_tool():
         return masks
 
 
+class Video_sam_tool():
+    def __init__(self,mask_generator_type = "video"):
+
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
+        self.device = device
+
+        self.video_dir = None
+        self.inference_state = None
+        self.ann_obj_id = 1
+
+        if mask_generator_type == "video":
+            self.predictor = self._load_predictor()
+        else: 
+            print(f"Error: cannot find the {mask_generator_type} type mask_generator!")
+
+    def _load_predictor(self):
+        # Get the path of trained model
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        parent_dir = os.path.dirname(os.path.dirname(current_dir))
+        sam2_checkpoint = os.path.join(parent_dir,"third_part/sam2/checkpoints/sam2.1_hiera_large.pt")
+
+        model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+
+        predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint, device = self.device)
+        return predictor
+    
+    def init_model_state(self,video_dir):
+        self.video_dir = video_dir
+        self.inference_state = self.predictor.init_state(video_path=video_dir)
+        self.predictor.reset_state(self.inference_state)
+
+    def click_set_prompt(self,frame_id = 0):
+
+        if self.video_dir == None:
+            print('Error in video dir!')
+            return None
+
+        # Get the image path 
+        image_path = os.path.join(self.video_dir,str(frame_id))
+        point_selector = PointSelector(image_path)
+        points_pos, point_labels = point_selector.select_points()
+        points = np.array(points_pos)
+        labels = np.array(point_labels)
+        _, object_ids, masks = self.predictor.add_new_points_or_box(
+            inference_state=self.inference_state,
+            frame_idx=frame_id,
+            obj_id=self.ann_obj_id,
+            points=points,
+            labels=labels,
+            )
+            
+        video_segments = {}  # video_segments contains the per-frame segmentation results
+        for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(self.inference_state):
+            video_segments[out_frame_idx] = {
+                out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
+                for i, out_obj_id in enumerate(out_obj_ids)
+            }
+
+        return video_segments
+
+
+
 class Points_fusion_tool():
+
     def __init__(self):
         self.extrinsic = []
         self.intrinsic = []

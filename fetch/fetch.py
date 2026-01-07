@@ -70,6 +70,8 @@ class Fetch:
             queue_size=1,
         )
 
+        self.head_joint_names = ["head_pan_joint", "head_tilt_joint"]
+
         # Add joint states subscriber
         self.joint_states = None
         self.joint_state_subscriber = rospy.Subscriber(

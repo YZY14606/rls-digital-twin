@@ -87,9 +87,9 @@ class contact_predictor:
         # Convert sigmoid probabilities to mask using threshold
         pred_contact_np = torch.sigmoid(pred_contact[0]).cpu().detach().numpy()
         # Get the max value index
-        # max_index = self.select_contact_point(current_pc_nrd.copy(),pred_contact_np.squeeze(),pred_orientation_np.copy())
-        max_index = self.noly_critic_select_point(current_pc_nrd = current_pc_nrd.copy(),pred_orientation_np = pred_orientation_np.copy(),
-                                                  local_frame_future_pose = local_frame_future_pose.copy())
+        max_index = self.select_contact_point(current_pc_nrd.copy(),pred_contact_np.squeeze(),pred_orientation_np.copy())
+        # max_index = self.noly_critic_select_point(current_pc_nrd = current_pc_nrd.copy(),pred_orientation_np = pred_orientation_np.copy(),
+        #                                           local_frame_future_pose = local_frame_future_pose.copy())
         # max_index = np.argmax(pred_contact_np.squeeze())
 
         # Get the output shape

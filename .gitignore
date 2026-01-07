@@ -168,3 +168,6 @@ third_part/
 build/
 devel/
 checkpoints/
+video_predictor_example.ipynb
+video_predictor_example.py
+visualizations/
