@@ -2,8 +2,14 @@ import cv2
 import numpy as np
 
 class PointSelector:
-    def __init__(self, image_path):
-        self.image = cv2.imread(image_path)
+    def __init__(self, image_path = None, rgb = None):
+        if image_path ==None and rgb != None:
+            self.image = rgb
+        elif image_path !=None and rgb == None:
+            self.image = cv2.imread(image_path)
+        else:
+            print('Image loading error!')
+
         if self.image is None:
             raise FileNotFoundError(f"Cannot load image from path: {image_path}")
         

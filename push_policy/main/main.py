@@ -4,7 +4,7 @@ import os
 from transforms3d.euler import euler2quat, mat2euler
 from main_utils import (process_object_pointcloud,build_local_frame,First_path_plan,plan_from_waypoint,get_future_pose,get_current_pc_future_pose,
                         two_perp_poses_radius2,generate_action,convert_action_use,evaluate_complete_action,test_fetch_motion_plan,move_base_to_target,
-                        collect_and_segmented_pcd,test_cartesian_interpolated_motion)
+                        collect_and_segmented_pcd,test_cartesian_interpolated_motion,pointcloud_segmentation_fusion_by_video)
 from pose_estimate.pose_estimator import Pose_Estimator
 import torch
 from sim_tool.Information_tool import SimController
@@ -12,6 +12,7 @@ from fetch.fetch import Fetch
 from pathlib import Path
 import rospy
 import open3d as o3d
+from segmentation.segmentation import Segmentation_tool,Video_sam_tool
 
 
 def main():
@@ -45,6 +46,12 @@ def main():
     costmap_path = parent_3 / "resources/costmap.npz"
     fetch = Fetch(urdf_path = urdf_path,costmap_path=costmap_path)
 
+    # define the image segmentation tool
+    image_seg_tool = Segmentation_tool()
+
+    # define the video segmentation tool
+    video_seg_tool = Video_sam_tool()
+
     # Record the times of pushing
     itr_plan = 0
     traj_id = '0'
@@ -62,42 +69,43 @@ def main():
     # print(euler)
 
     # 注释掉，为了方便后续的调试
-    # object_pcd_list = []
-    # obstacle_pcd_list = []
-    # for key in range(3): 
-    #     target_base_pose = robot_base_pose[key]
-    #     position = [target_base_pose[0],target_base_pose[1],0]
-    #     orientation_wxyz = euler2quat(0,0,target_base_pose[2])
-    #     orientation_xyzw = [orientation_wxyz[1],orientation_wxyz[2],orientation_wxyz[3],orientation_wxyz[0]]
-    #     fetch.send_target_position(position,orientation_xyzw)
-    #     rospy.sleep(0.5)  # Wait between movements
-    #     fetch.move_head(pan = 0.0, tilt = 0.0, duration=1.0)
-    #     # move_base_to_target(fetch=fetch,target_base_pose=target_base_pose)
-    #     # rospy.sleep(0.5)  # Wait between movements
-    #     topic = ['/head_camera/rgb/image_raw','/head_camera/depth_registered/image_raw','/head_camera/rgb/camera_info']
-    #     obj_pcd_wld_frame, obstacle_pcd_wld_frame = collect_and_segmented_pcd(simulation_control = simulation_control,topic = topic,fetch = fetch)
-    #     object_pcd_list.append(obj_pcd_wld_frame)
-    #     obstacle_pcd_list.append(obstacle_pcd_wld_frame)
+    object_pcd_list = []
+    obstacle_pcd_list = []
+    for key in range(3): 
+        target_base_pose = robot_base_pose[key]
+        position = [target_base_pose[0],target_base_pose[1],0]
+        orientation_wxyz = euler2quat(0,0,target_base_pose[2])
+        orientation_xyzw = [orientation_wxyz[1],orientation_wxyz[2],orientation_wxyz[3],orientation_wxyz[0]]
+        fetch.send_target_position(position,orientation_xyzw)
+        rospy.sleep(0.5)  # Wait between movements
+        fetch.move_head(pan = 0.0, tilt = 0.0, duration=1.0)
+        # move_base_to_target(fetch=fetch,target_base_pose=target_base_pose)
+        # rospy.sleep(0.5)  # Wait between movements
+        topic = ['/head_camera/rgb/image_raw','/head_camera/depth_registered/image_raw','/head_camera/rgb/camera_info']
+        obj_pcd_wld_frame, obstacle_pcd_wld_frame = collect_and_segmented_pcd(simulation_control = simulation_control,topic = topic,fetch = fetch,
+                                                                              image_seg_tool = image_seg_tool)
+        object_pcd_list.append(obj_pcd_wld_frame)
+        obstacle_pcd_list.append(obstacle_pcd_wld_frame)
 
-    # object_pcds = np.concatenate(object_pcd_list,axis=0)
-    # obstacle_pcds = np.concatenate(obstacle_pcd_list,axis=0)
-    # print(object_pcds.shape)
-    # pcd = o3d.geometry.PointCloud()
-    # pcd.points = o3d.utility.Vector3dVector(object_pcds)
-    # o3d.visualization.draw_geometries([pcd])
-    # print("Point cloud bounds:")
-    # print("Min:", object_pcds.min(axis=0))
-    # print("Max:", object_pcds.max(axis=0))
-    # print("Center:", object_pcds.mean(axis=0))
+    object_pcds = np.concatenate(object_pcd_list,axis=0)
+    obstacle_pcds = np.concatenate(obstacle_pcd_list,axis=0)
+    print(object_pcds.shape)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(object_pcds)
+    o3d.visualization.draw_geometries([pcd])
+    print("Point cloud bounds:")
+    print("Min:", object_pcds.min(axis=0))
+    print("Max:", object_pcds.max(axis=0))
+    print("Center:", object_pcds.mean(axis=0))
 
-    # print(obstacle_pcds.shape)
-    # pcd = o3d.geometry.PointCloud()
-    # pcd.points = o3d.utility.Vector3dVector(obstacle_pcds)
-    # o3d.visualization.draw_geometries([pcd])
-    # print("Point cloud bounds:")
-    # print("Min:", obstacle_pcds.min(axis=0))
-    # print("Max:", obstacle_pcds.max(axis=0))
-    # print("Center:", obstacle_pcds.mean(axis=0))
+    print(obstacle_pcds.shape)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(obstacle_pcds)
+    o3d.visualization.draw_geometries([pcd])
+    print("Point cloud bounds:")
+    print("Min:", obstacle_pcds.min(axis=0))
+    print("Max:", obstacle_pcds.max(axis=0))
+    print("Center:", obstacle_pcds.mean(axis=0))
 
     # Move fetch to manipulation pose
     manipulation_pose = robot_base_pose[3]
@@ -111,8 +119,10 @@ def main():
 
     # get object pointcloud for test: YZY
     topic = ['/head_camera/rgb/image_raw','/head_camera/depth_registered/image_raw','/head_camera/rgb/camera_info']
-    object_pcds, obstacle_pcd_wld_frame = collect_and_segmented_pcd(simulation_control = simulation_control,topic = topic,fetch = fetch)
+    object_pcds, obstacle_pcd_wld_frame = collect_and_segmented_pcd(simulation_control = simulation_control,topic = topic,fetch = fetch,
+                                                                    image_seg_tool = image_seg_tool)
 
+    first_prompt = image_seg_tool.latest_prompt
     path_point_index = 1
     # 进行15次循环，如果机器人在25个循环内完成目标，就算成功
     for i in range(25):
@@ -233,7 +243,7 @@ def main():
             source_obj_pose = original_pose.clone().cpu().numpy()
 
         # Get the object's pointcloud
-        object_wrld_frame_pcd = pointcloud_segmentation_fusion(simulation_control,topic,camera_name_list)
+        object_wrld_frame_pcd = pointcloud_segmentation_fusion_by_video(rgb_list,depth_list,intrinsics_list,camera_pose_list,video_seg_tool,itr_plan,first_prompt)
 
         # Judge the success
         success_judge = evaluate_complete_action(target_pose,source_obj_pcd,source_obj_pose,object_wrld_frame_pcd.copy())

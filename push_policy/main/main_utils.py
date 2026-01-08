@@ -943,7 +943,7 @@ def move_base_to_target(fetch,target_base_pose):
 
 
 
-def collect_and_segmented_pcd(simulation_control,topic,fetch):
+def collect_and_segmented_pcd(simulation_control,topic,fetch,image_seg_tool):
     """
     collect_and_segmented_pcd 的 Docstring:
         获得障碍物与物体的点云。
@@ -961,16 +961,17 @@ def collect_and_segmented_pcd(simulation_control,topic,fetch):
     intrinsic_topic = topic[2]
     rgb, depth , cam2world, intrinsic_cv = simulation_control.get_rgb_depth(rgb_topic= rgb_topic,depth_topic= depth_topic,
                                                                             intrinsic_topic = intrinsic_topic, camera_pose = camera_pose)
-    # Get the chair mask
-    green_mask = (rgb[:, :, 1] > 130) & (rgb[:, :, 0] < 60) & (rgb[:, :, 2] < 60)
-    green_points = np.argwhere(green_mask) # shape(N,2)
-    chosen_indices = np.random.choice(len(green_points), size=3, replace=False)
-    # 返回这两个点的位置 (row, col)
-    position = green_points[chosen_indices]
-    labels = np.array([1,1,1])
-    # Use sam2 to get the mask of target object
-    position[:,[0,1]] = position[:,[1,0]]
-    mask_data = generate_segmentation_mask(rgb, position, labels)
+    # # Get the chair mask
+    # green_mask = (rgb[:, :, 1] > 130) & (rgb[:, :, 0] < 60) & (rgb[:, :, 2] < 60)
+    # green_points = np.argwhere(green_mask) # shape(N,2)
+    # chosen_indices = np.random.choice(len(green_points), size=3, replace=False)
+    # # 返回这两个点的位置 (row, col)
+    # position = green_points[chosen_indices]
+    # labels = np.array([1,1,1])
+    # # Use sam2 to get the mask of target object
+    # position[:,[0,1]] = position[:,[1,0]]
+    # mask_data = generate_segmentation_mask(rgb, position, labels)
+    mask_data = image_seg_tool.segment_image_by_click(rgb)
     segmentation = torch.tensor(mask_data).squeeze().to(device)
 
     import cv2
@@ -1019,6 +1020,34 @@ def collect_and_segmented_pcd(simulation_control,topic,fetch):
     mask = obstacle_pcd_wld_frame[:, 2] >= 0.75
     filtered_obstacle_pcd_wld_frame = obstacle_pcd_wld_frame[mask]
 
-
-
     return filtered_wld_frame_points.cpu().numpy(), filtered_obstacle_pcd_wld_frame.cpu().numpy()
+
+
+
+def pointcloud_segmentation_fusion_by_video(rgb_list,depth_list,intrinsics_list,camera_pose_list,video_seg_tool,itr_plan,first_prompt):
+    # Save the rgb-image to video-dir
+    video_dir = os.path.join('push_policy/segmentation/rgb_video',str(itr_plan))
+    os.makedirs(video_dir, exist_ok=True)
+    for idx, rgb in enumerate(rgb_list):
+        if not isinstance(rgb, np.ndarray):
+            raise TypeError(f"Frame {idx} is not a numpy array")
+        if rgb.ndim != 3 or rgb.shape[2] != 3:
+            raise ValueError(f"Frame {idx} has invalid shape: {rgb.shape}")
+        if rgb.dtype != np.uint8:
+            rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+
+        # Set image name
+        filename = f"{idx:06d}.jpg"   # 永远字典序 == 时间序
+        filepath = os.path.join(video_dir, filename)
+        # Save as image
+        Image.fromarray(rgb, mode="RGB").save(
+            filepath,
+            format="JPEG",
+            quality=95,
+            subsampling=0
+        )
+        
+    # Get taget rgb mask from video
+    video_seg_tool.init_model_state(video_dir)
+    if itr_plan == 1:
+        video_segments = video_seg_tool.get_mask_from_video(prompt = first_prompt,frame_id =0)
