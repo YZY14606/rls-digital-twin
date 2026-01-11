@@ -30,6 +30,12 @@ from scipy.spatial.transform import Slerp
 
 from fetch.grasp_utils.trac_api import trac_solve_fixed_base_arm
 
+from sensor_msgs.msg import (
+    CompressedImage
+)
+
+from actionlib_msgs.msg import GoalStatus
+
 class Fetch:
     """
     Core class for controlling the Fetch robot.
@@ -55,6 +61,27 @@ class Fetch:
 
         # Set camera info collect sigin
         self.collect_camera_data = False
+
+        self.joint_trajectory_finished = False
+
+        # Note: Using compressed topic directly since throttled version isn't publishing
+        rgb_topic = "/throttled_camera/rgb/compressed"
+        rospy.loginfo(f"Subscribing to RGB topic: {rgb_topic}")
+        self.rgb_sub = rospy.Subscriber(
+            rgb_topic, CompressedImage, self._rgb_callback, queue_size=1
+        )
+        self.depth_sub = rospy.Subscriber(
+            "/throttled_camera/depth/compressedDepth",
+            CompressedImage,
+            self._depth_callback,
+            queue_size=1,
+        )
+        self.info_sub = rospy.Subscriber(
+            "/head_camera/rgb/camera_info",
+            CameraInfo,
+            self._info_callback,
+            queue_size=1,
+        )
 
         # Head Action Client
         self.head_traj_client = actionlib.SimpleActionClient(
@@ -193,7 +220,7 @@ class Fetch:
 
 
     def send_cartesian_interpolated_motion(
-        self, target_ee_pos, target_ee_quat, duration=3.0, num_waypoints=5
+        self, target_ee_pose, duration=3.0, num_waypoints=5
     ):
         """
         Move to target end-effector pose via Cartesian interpolation mapped to joint space.
@@ -214,6 +241,9 @@ class Fetch:
         Returns:
             Result from action client, or None on failure
         """
+
+        target_ee_pos_world = np.array([target_ee_pose.position.x,target_ee_pose.position.y,target_ee_pose.position.z])
+        target_ee_quat_world = np.array([target_ee_pose.orientation.x,target_ee_pose.orientation.y,target_ee_pose.orientation.z,target_ee_pose.orientation.w])
 
         # Get current state
         current_torso = self.get_torso_position()
@@ -239,8 +269,6 @@ class Fetch:
             current_ee_quat_base,
         )
 
-        target_ee_pos_world = target_ee_pos
-        target_ee_quat_world = target_ee_quat
 
         # Create SLERP interpolator for orientation
         key_rots = R.from_quat([current_ee_quat_world, target_ee_quat_world])
@@ -336,10 +364,13 @@ class Fetch:
         # torso_success = self.torso_client.wait_for_result(timeout)
         # arm_success = self.arm_traj_client.wait_for_result(timeout)
 
-        while not self.execution_finished and not rospy.is_shutdown():
+        while not self.joint_trajectory_finished and not rospy.is_shutdown():
+            torso_done = self.check_torso_done()
+            arm_done = self.check_arm_done()
+            self.joint_trajectory_finished = torso_done and arm_done
             if self.collect_camera_data:
                 self.collect_images_info()
-            rospy.sleep(0.1)
+            rospy.sleep(0.2)
 
 
         # if torso_success and arm_success:
@@ -359,7 +390,7 @@ class Fetch:
         #         )
         #     return None
 
-        if self.execution_finished:
+        if self.joint_trajectory_finished:
             print(
                 "Cartesian interpolated trajectory execution completed successfully"
             )
@@ -367,6 +398,17 @@ class Fetch:
         else:
             print("Trajectory execution failed or timed out")
             return None
+
+    def check_torso_done(self):
+        state = self.torso_client.get_state()
+        return state in [GoalStatus.SUCCEEDED, GoalStatus.ABORTED, GoalStatus.PREEMPTED, GoalStatus.REJECTED]
+
+
+    def check_arm_done(self):
+        state = self.arm_traj_client.get_state()
+        return state in [GoalStatus.SUCCEEDED, GoalStatus.ABORTED, GoalStatus.PREEMPTED, GoalStatus.REJECTED]
+
+
 
     def move_head(self, pan, tilt, duration=1.0):
         # Compute current head positions
@@ -1144,7 +1186,7 @@ class Fetch:
             while not self.execution_finished and not rospy.is_shutdown():
                 if self.collect_camera_data:
                     self.collect_images_info()
-                rospy.sleep(0.1)
+                rospy.sleep(0.5)
 
             if self.execution_finished:
                 rospy.loginfo("Whole body motion execution completed successfully.")

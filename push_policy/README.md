@@ -1,4 +1,4 @@
-# This file talk about how to create a environment for object_centric_policy.
+# This file talk about how to create a environment for real_robot_policy.
 
 `conda create -n real_robot_policy python==3.12.4`
 
@@ -14,16 +14,12 @@
 
 `pip install -e .`
 
-# Vulkan install
-`sudo apt-get update`
-
-`sudo apt-get install libvulkan1`
-
-`sudo apt-get install vulkan-utils (if ubuntu 22.04, install vulkan-tools)`
-
-`vulkaninfo`
 
 # SAM-2 install
+
+`cd rls-digital-twin`
+
+`mkdir third_part`
 
 `cd third_part`
 
@@ -31,16 +27,15 @@
 
 `pip install -e .`
 
-Download all checkpoints:
-`cd checkpoints && \
-./download_ckpts.sh && \
-cd ..`
+Download checkpoint: 
 
-Or download single one in: https://github.com/facebookresearch/sam2.
+`cd checkpoints`
+
+`wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt`
 
 # Object-planner install
 
-`cd .. (cd my_porject)`
+`cd third_part`
 
 `git clone https://github.com/H-tr/object_planner.git`
 

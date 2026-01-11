@@ -4,7 +4,7 @@ import os
 from transforms3d.euler import euler2quat, mat2euler
 from main_utils import (process_object_pointcloud,build_local_frame,First_path_plan,plan_from_waypoint,get_future_pose,get_current_pc_future_pose,
                         two_perp_poses_radius2,generate_action,convert_action_use,evaluate_complete_action,test_fetch_motion_plan,move_base_to_target,
-                        collect_and_segmented_pcd,test_cartesian_interpolated_motion,pointcloud_segmentation_fusion_by_video)
+                        collect_and_segmented_pcd,test_cartesian_interpolated_motion,pointcloud_segmentation_fusion_by_video,convert_source_pcd_to_current)
 from pose_estimate.pose_estimator import Pose_Estimator
 import torch
 from sim_tool.Information_tool import SimController
@@ -12,17 +12,22 @@ from fetch.fetch import Fetch
 from pathlib import Path
 import rospy
 import open3d as o3d
-from segmentation.segmentation import Segmentation_tool,Video_sam_tool
+from segmentation.segmentation import Segmentation_tool,Video_sam_tool, Points_fusion_tool
 
 
 def main():
     # Set target information
-    target_xyz = np.array([3.0,2.0,0.0])
+    target_xyz = np.array([3.0,2.0,0.75])
     target_quat = np.array(euler2quat(0,0,np.pi/2))
     target_pose = np.concatenate([target_xyz,target_quat],axis=0)
 
     # Set object original pose (It should be same with the real world pose.)
-    original_pose = np.array([-3.0,1.5,0.8,1,0,0,0])
+    original_pose = np.array([-3.0,1.5,0.732,1,0,0,0])
+
+    # Set the scene parameters for object path planning
+    scene_args = {}
+    scene_args['robot_radius'] = 0.3 # It can be set larger than real robot.
+    scene_args['table_height'] = 0.74 # It is the real height of the table.
 
     # Set the single push parameter
     push_step_dict = dict()
@@ -52,21 +57,21 @@ def main():
     # define the video segmentation tool
     video_seg_tool = Video_sam_tool()
 
+    # Define a pointcloud fusion tool
+    pcd_fusion_tool =  Points_fusion_tool()
+
     # Record the times of pushing
     itr_plan = 0
     traj_id = '0'
     file_name = 'test_yzy'
 
-    # 进行机器人初始的信息采集(从三个视角获取物体与环境点云),i以及设定初始操作pose
+    # 进行机器人初始的信息采集(从三个视角获取物体与环境点云),以及设定初始操作pose
     robot_base_pose = {}
     robot_base_pose[0] = [-2,0.5,np.pi*2/3]
     robot_base_pose[1] = [-4,0.5,np.pi/3]
     robot_base_pose[2] = [-3,3,-np.pi/2]
-    robot_base_pose[3] = [-3,0.5,np.pi/2]
+    robot_base_pose[3] = [-3.0,0.5,np.pi/2] # The manipulation pose.
 
-    # camera_pose = fetch.get_camera_pose()
-    # euler = mat2euler(camera_pose[:3,:3])
-    # print(euler)
 
     # 注释掉，为了方便后续的调试
     object_pcd_list = []
@@ -79,33 +84,38 @@ def main():
         fetch.send_target_position(position,orientation_xyzw)
         rospy.sleep(0.5)  # Wait between movements
         fetch.move_head(pan = 0.0, tilt = 0.0, duration=1.0)
+
+        # If use whole body controller
         # move_base_to_target(fetch=fetch,target_base_pose=target_base_pose)
-        # rospy.sleep(0.5)  # Wait between movements
+
+        rospy.sleep(0.5)  # Wait between movements
         topic = ['/head_camera/rgb/image_raw','/head_camera/depth_registered/image_raw','/head_camera/rgb/camera_info']
         obj_pcd_wld_frame, obstacle_pcd_wld_frame = collect_and_segmented_pcd(simulation_control = simulation_control,topic = topic,fetch = fetch,
-                                                                              image_seg_tool = image_seg_tool)
+                                                                              image_seg_tool = image_seg_tool, pcd_fusion_tool = pcd_fusion_tool)
         object_pcd_list.append(obj_pcd_wld_frame)
         obstacle_pcd_list.append(obstacle_pcd_wld_frame)
 
     object_pcds = np.concatenate(object_pcd_list,axis=0)
     obstacle_pcds = np.concatenate(obstacle_pcd_list,axis=0)
-    print(object_pcds.shape)
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(object_pcds)
-    o3d.visualization.draw_geometries([pcd])
-    print("Point cloud bounds:")
-    print("Min:", object_pcds.min(axis=0))
-    print("Max:", object_pcds.max(axis=0))
-    print("Center:", object_pcds.mean(axis=0))
 
-    print(obstacle_pcds.shape)
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(obstacle_pcds)
-    o3d.visualization.draw_geometries([pcd])
-    print("Point cloud bounds:")
-    print("Min:", obstacle_pcds.min(axis=0))
-    print("Max:", obstacle_pcds.max(axis=0))
-    print("Center:", obstacle_pcds.mean(axis=0))
+    # Visulize the objectpoints and obstacle pointcloud
+    # print(object_pcds.shape)
+    # pcd = o3d.geometry.PointCloud()
+    # pcd.points = o3d.utility.Vector3dVector(object_pcds)
+    # o3d.visualization.draw_geometries([pcd])
+    # print("Point cloud bounds:")
+    # print("Min:", object_pcds.min(axis=0))
+    # print("Max:", object_pcds.max(axis=0))
+    # print("Center:", object_pcds.mean(axis=0))
+
+    # print(obstacle_pcds.shape)
+    # pcd = o3d.geometry.PointCloud()
+    # pcd.points = o3d.utility.Vector3dVector(obstacle_pcds)
+    # o3d.visualization.draw_geometries([pcd])
+    # print("Point cloud bounds:")
+    # print("Min:", obstacle_pcds.min(axis=0))
+    # print("Max:", obstacle_pcds.max(axis=0))
+    # print("Center:", obstacle_pcds.mean(axis=0))
 
     # Move fetch to manipulation pose
     manipulation_pose = robot_base_pose[3]
@@ -117,42 +127,63 @@ def main():
     fetch.move_head(pan = 0.0, tilt = 0.0, duration=1.0)
     rospy.sleep(0.5)  # Wait between movem
 
-    # get object pointcloud for test: YZY
-    topic = ['/head_camera/rgb/image_raw','/head_camera/depth_registered/image_raw','/head_camera/rgb/camera_info']
-    object_pcds, obstacle_pcd_wld_frame = collect_and_segmented_pcd(simulation_control = simulation_control,topic = topic,fetch = fetch,
-                                                                    image_seg_tool = image_seg_tool)
+    # # get object pointcloud for test: YZY
+    # topic = ['/head_camera/rgb/image_raw','/head_camera/depth_registered/image_raw','/head_camera/rgb/camera_info']
+    # object_pcds, obstacle_pcds = collect_and_segmented_pcd(simulation_control = simulation_control,topic = topic,fetch = fetch,
+    #                                                                 image_seg_tool = image_seg_tool,pcd_fusion_tool = pcd_fusion_tool)
+    
+    object_wrld_frame_pcd = process_object_pointcloud(object_pcds,pcd_fusion_tool)
+    obstacle_wrld_frame_pcd = process_object_pointcloud(obstacle_pcds,num_samples=4096)
+
+    # Add obstacle pointcloud for fetch
+    fetch.add_pointcloud(points = obstacle_wrld_frame_pcd)
 
     first_prompt = image_seg_tool.latest_prompt
     path_point_index = 1
-    # 进行15次循环，如果机器人在25个循环内完成目标，就算成功
+    path_plan_state = 'Normal'
+    # 进行25次循环，如果机器人在25个循环内完成目标，就算成功
     for i in range(25):
         itr_plan = itr_plan +1
         print(f"This is the {itr_plan} push.")
 
-        object_wrld_frame_pcd = process_object_pointcloud(object_pcds)
-        # visulize_pointcloud(object_points_wld)
+        # Record the original object's pointcloud and pose for final evaluation
+        if itr_plan == 1:
+            source_obj_pcd = object_wrld_frame_pcd.copy()
+            source_obj_pose = original_pose.copy()
+
 
         # Construct local frame
         local_frame_pose = build_local_frame(object_wrld_frame_pcd.copy())
 
         if itr_plan == 1:
             # Define a object pose estimator
-            pose_estimator = Pose_Estimator(source_pcd_wld = object_wrld_frame_pcd, ori_pose = original_pose,
+            pose_estimator = Pose_Estimator(source_pcd_wld = object_wrld_frame_pcd, ori_pose = original_pose.copy(),
                                             original_PCA_frame_pose = local_frame_pose)
             object_pose = torch.tensor(original_pose)
-            object_pose[2] = 0
         else:
             object_pose = pose_estimator.estimate_object_pose(now_pointcloud = object_wrld_frame_pcd,local_frame_pose = local_frame_pose)
             object_pose = torch.tensor(object_pose)
+
+            # Get the registered pcd
+            object_wrld_frame_pcd = convert_source_pcd_to_current(source_pcd = source_obj_pcd,source_pose = source_obj_pose,current_pose = object_pose)
+
 
         loop_times = 0
         while True:
             loop_times += 1
             # Path plan
             if itr_plan == 1:
-                path_points,path_planner = First_path_plan(target_pose,object_pose.clone(),object_wrld_frame_pcd.copy())
+                # Get the robot base position
+                robot_base_position = fetch.get_base_params()
+                scene_args['base_pos'] = np.array([robot_base_position[0],robot_base_position[1]])
+
+                path_points,path_planner = First_path_plan(target_pose,object_pose.clone(),object_wrld_frame_pcd.copy(),obstacle_wrld_frame_pcd,scene_args)
             if path_point_index == 2:
-                path_points,path_planner = plan_from_waypoint(target_pose,object_pose.clone(),path_planner)
+                # Get the robot base position
+                robot_base_position = fetch.get_base_params()
+                scene_args['base_pos'] = np.array([robot_base_position[0],robot_base_position[1]])
+
+                path_points,path_planner = plan_from_waypoint(target_pose,object_pose.clone(),path_planner,obstacle_wrld_frame_pcd,scene_args)
                 print("The object has arrived at the middle waypoint. Plan path again.")
                 path_point_index = 1
 
@@ -184,7 +215,6 @@ def main():
 
             # Test this path point with motion planning and path planning
             # 让机械臂移动到ps
-            ps_pose_1 = ps_pose.copy()
             # Record bi-level plan results
             bi_level_plan_results = []
             # Get robot's current state
@@ -192,15 +222,15 @@ def main():
             current_base = fetch.get_base_params()
             current_state = dict()
             current_state['current_joints'] = current_joints
-            current_state['ccurrent_base'] = current_base
-            now_current_state,result = test_fetch_motion_plan(fetch = fetch, current_state = current_state, target_pose = ps_pose_1)
+            current_state['current_base'] = current_base
+            now_current_state,result = test_fetch_motion_plan(fetch = fetch, current_state = current_state, target_pose = ps_pose)
+
             bi_level_plan_results.append(result)
             if result == None:
                 path_point_index = 2
                 continue
             # 让机械臂移动到pe
-            goal_pose = pe_pose.copy()
-            now_current_state,result = test_cartesian_interpolated_motion(fetch= fetch, current_state = current_state,target_ee_pose = goal_pose)
+            now_current_state,result = test_cartesian_interpolated_motion(fetch= fetch, current_state = now_current_state,target_ee_pose = pe_pose)
             bi_level_plan_results.append(result)
             if result == None:
                 path_point_index = 2
@@ -220,16 +250,37 @@ def main():
 
 
         # 首先让机械臂移动到ps
-        ps_pose_1 = ps_pose.copy()
         fetch.collect_camera_data = True
-        state = fetch.move_to_pose(target_pose = ps_pose_1)
+        state = fetch.move_to_pose(target_pose = ps_pose)
+        if not state:
+            # If plan fails, execute the bi-level planning result.
+            result_0 = bi_level_plan_results[0]
+            state = fetch.execute_whole_body_motion(
+            result_0["arm_path"], result_0["base_configs"]
+        )
+
         # 让机械臂移动到pe
-        state = fetch.send_cartesian_interpolated_motion(target_ee_pos = pe_pose[:3], target_ee_quat = pe_pose[3:])
+        state = fetch.send_cartesian_interpolated_motion(target_ee_pose = pe_pose)
+        if not state:
+            # If plan fails, execute the bi-level planning result.
+            result_1 = bi_level_plan_results[1]
+            joint_trajectory = result_1
+            state = fetch.execute_joint_trajectory(joint_trajectory, duration = 3.0)
+
+
         # 让机械臂移动到ps
-        state = fetch.move_to_pose(target_pose = ps_pose_1)
+        state = fetch.move_to_pose(target_pose = ps_pose)
+        if not state:
+            # If plan fails, execute the bi-level planning result.
+            result_2 = bi_level_plan_results[2]
+            state = fetch.execute_whole_body_motion(
+            result_2["arm_path"], result_2["base_configs"]
+        )
+
+        # Stop the automatically iamge collection
+        fetch.collect_camera_data = False
 
         # 进行收集的图像的处理
-        fetch.collect_camera_data = False
         rgb_list = fetch.rgb_list
         depth_list = fetch.depth_list
         intrinsics_list = fetch.intrinsics_list
@@ -237,13 +288,9 @@ def main():
         # Clear the image lists
         fetch.clear_images_info_list()
 
-        # Record the original object's pointcloud and pose for final evaluation
-        if itr_plan == 1:
-            source_obj_pcd = object_wrld_frame_pcd.copy()
-            source_obj_pose = original_pose.clone().cpu().numpy()
-
         # Get the object's pointcloud
-        object_wrld_frame_pcd = pointcloud_segmentation_fusion_by_video(rgb_list,depth_list,intrinsics_list,camera_pose_list,video_seg_tool,itr_plan,first_prompt)
+        object_wrld_frame_pcd, obstacle_pcd_wld_frame = pointcloud_segmentation_fusion_by_video(rgb_list,depth_list,intrinsics_list,
+                                                        camera_pose_list,video_seg_tool,itr_plan,first_prompt,source_obj_pcd)
 
         # Judge the success
         success_judge = evaluate_complete_action(target_pose,source_obj_pcd,source_obj_pose,object_wrld_frame_pcd.copy())
@@ -252,7 +299,6 @@ def main():
             print("Success!")
             break
 
-        break
 
     print(f"This trial uses {itr_plan} steps.")
 

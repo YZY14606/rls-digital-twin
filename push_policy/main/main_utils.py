@@ -29,6 +29,8 @@ from scipy.spatial.transform import Slerp
 
 from fetch.grasp_utils.trac_api import trac_solve_fixed_base_arm
 
+from geometry_msgs.msg import Pose
+
 # 对于观测的点云，构建局部坐标系
 def build_local_frame(points):
     # Down sample
@@ -256,8 +258,61 @@ def transform_to_object_frame(points, obj_position, obj_quaternion):
 
     return points_obj_frame
 
+
+
+def generate_circle_point_cloud(center, radius, num_points):
+    """
+    生成圆形点云
+    
+    参数:
+    center: 圆心坐标 (x, y, z)
+    radius: 圆半径
+    num_points: 采样点数
+    
+    返回:
+    points: 点云坐标数组 (num_points, 3)
+    """
+    # 生成均匀的角度采样
+    angles = np.linspace(0, 2 * np.pi, num_points, endpoint=False)
+    
+    # 计算圆上的点坐标（在xy平面）
+    x = center[0] + radius * np.cos(angles)
+    y = center[1] + radius * np.sin(angles)
+    z = np.full(num_points, center[2])  # z坐标保持不变
+    
+    # 组合成点云数组
+    points = np.column_stack((x, y, z))
+    
+    return points
+
+def move_points_toward_xy(points, x0, y0, d):
+    """
+    将点云中每个点在 xy 平面上向 (x0, y0) 移动距离 d。
+    Args:
+        points: np.ndarray of shape (N, 3)
+        x0, y0: float, 目标点坐标
+        d: float, 移动距离（可正可负；正表示靠近，负表示远离）
+    Returns:
+        new_points: np.ndarray of shape (N, 3)
+    """
+    # 提取 xy 坐标
+    xy = points[:, :2]  # (N, 2)
+    target = np.array([x0, y0])  # (2,)
+    # 计算方向向量：从当前点指向 (x0, y0)
+    direction = target - xy  # (N, 2)
+    # 计算距离（L2 norm）
+    norms = np.linalg.norm(direction, axis=1, keepdims=True)  # (N, 1)
+    # 避免除零：如果距离为0，方向设为0（不移动）
+    eps = 1e-8
+    unit_direction = direction / (norms + eps)  # (N, 2)
+    # 移动：原位置 + d * 单位方向
+    new_xy = xy + d * unit_direction  # (N, 2)
+    # 拼接 z 坐标
+    new_points = np.concatenate([new_xy, points[:, 2:3]], axis=1)  # (N, 3)
+    return new_points
+
 # 进行全局路径规划，得到可行的路径点
-def First_path_plan(target_pose,object_pose,object_wrld_frame_pcd,
+def First_path_plan(target_pose,object_pose,object_wrld_frame_pcd,obstacle_wrld_frame_pcd,scene_args,
                     obstacle_buff_len_list = [0.04, 0.01, 0], object_buff_len = 0.01, visulize_result = False):
     # Get target information for path planning
     target_xy = target_pose[:2].copy()
@@ -301,29 +356,26 @@ def First_path_plan(target_pose,object_pose,object_wrld_frame_pcd,
 
     # Change the obstacle's size, and replan
     for obstacle_buff_len in obstacle_buff_len_list:
-        # # Get obstacle information for path planning
-        # obstacle_index = env.obstacle_index
-        # obstacle_pointcloud = []
-        # for index in obstacle_index:
-        #     obstacle_mesh = env.obstacle_dic[index].get_collision_meshes()[0]
-        #     pointcloud = get_obstacel_pointcloud(obstacle_mesh, buff_len = obstacle_buff_len)
-        #     obstacle_pointcloud.append(pointcloud)
-        # if len(obstacle_pointcloud) != 0:
-        #     all_obstacle_pointcloud = np.concatenate(obstacle_pointcloud, axis=0)
-        # else:
-        #     center = np.array([-0.615,0,0])
-        #     radius = 0.23 + obstacle_buff_len
-        #     all_obstacle_pointcloud = generate_circle_point_cloud(center, radius, num_points = 100)
+        # Set the robotic pointcloud
+        table_height = scene_args['table_height'] # To be determined using real world data
+        robot_radius = scene_args['robot_radius'] # To be determined using real world data; It can be larger than 
+        center = np.array([scene_args['base_pos'][0],scene_args['base_pos'][1],table_height])
+        radius = robot_radius + obstacle_buff_len
+        robot_pointcloud = generate_circle_point_cloud(center, radius, num_points = 100)
 
-        # Set obstacle pointcloud 
-        all_obstacle_pointcloud = np.array([10,0,0]).reshape(-1,3)
+        # Get the obstacle pointcloud
+        # Move obstacle_buff_len to simulate the inflation
+        obstacle_wrld_frame_pcd = move_points_toward_xy(points=obstacle_wrld_frame_pcd.reshape(-1,3), x0=object_pose[0], y0=object_pose[1],
+                                                         d=obstacle_buff_len)
+
+        all_obstacle_pointcloud = np.concatenate([robot_pointcloud,obstacle_wrld_frame_pcd],axis=0)
 
         # Get scene data
         scene_dic = dict()
         scene_dic["object_points"] = object_point
         scene_dic["all_obstacle_points"] = all_obstacle_pointcloud
-        scene_dic["map_x_bounds"] = (-0.6, 0.6)
-        scene_dic["map_y_bounds"] = (-1, 1)
+        scene_dic["map_x_bounds"] = (-5, 0.6)
+        scene_dic["map_y_bounds"] = (-1, 5)
         scene_dic["map_theta_bound"] = (0, 2 * np.pi)
         path_planner.set_up_planner(scene_dic)
 
@@ -351,7 +403,8 @@ def First_path_plan(target_pose,object_pose,object_wrld_frame_pcd,
 
     return np.array(path_point),path_planner
 
-def plan_from_waypoint(target_pose,object_pose,path_planner,obstacle_buff_len_list = [0.04, 0.01, 0],visulize_result=False):
+def plan_from_waypoint(target_pose,object_pose,path_planner,obstacle_wrld_frame_pcd,scene_args,
+                       obstacle_buff_len_list = [0.04, 0.01, 0],visulize_result=False):
     # Get target information for path planning
     target_xy = target_pose[:2].copy()
     target_quat = target_pose[3:].copy()
@@ -378,19 +431,19 @@ def plan_from_waypoint(target_pose,object_pose,path_planner,obstacle_buff_len_li
 
     # Change the obstacle's size, and replan
     for obstacle_buff_len in obstacle_buff_len_list:
-        # Get obstacle information for path planning
-        obstacle_index = env.obstacle_index
-        obstacle_pointcloud = []
-        for index in obstacle_index:
-            obstacle_mesh = env.obstacle_dic[index].get_collision_meshes()[0]
-            pointcloud = get_obstacel_pointcloud(obstacle_mesh, buff_len = obstacle_buff_len)
-            obstacle_pointcloud.append(pointcloud)
-        if len(obstacle_pointcloud) != 0:
-            all_obstacle_pointcloud = np.concatenate(obstacle_pointcloud, axis=0)
-        else:
-            center = np.array([-0.615,0,0])
-            radius = 0.23 + obstacle_buff_len
-            all_obstacle_pointcloud = generate_circle_point_cloud(center, radius, num_points = 100)
+        # Set the robotic pointcloud
+        table_height = scene_args['table_height'] # To be determined using real world data
+        robot_radius = scene_args['robot_radius'] # To be determined using real world data; It can be larger than 
+        center = np.array([scene_args['base_pos'][0],scene_args['base_pos'][1],table_height])
+        radius = robot_radius + obstacle_buff_len
+        robot_pointcloud = generate_circle_point_cloud(center, radius, num_points = 100)
+
+        # Get the obstacle pointcloud
+        # Move obstacle_buff_len to simulate the inflation
+        obstacle_wrld_frame_pcd = move_points_toward_xy(points=obstacle_wrld_frame_pcd.reshape(-1,3), x0=object_pose[0], y0=object_pose[1],
+                                                         d=obstacle_buff_len)
+
+        all_obstacle_pointcloud = np.concatenate([robot_pointcloud,obstacle_wrld_frame_pcd],axis=0)
 
         scene_dic = path_planner.scene_dic
         scene_dic["all_obstacle_points"] = all_obstacle_pointcloud
@@ -404,7 +457,6 @@ def plan_from_waypoint(target_pose,object_pose,path_planner,obstacle_buff_len_li
 
         if len(path) > 1:
             break
-
 
 
     if visulize_result ==True:
@@ -447,6 +499,7 @@ def get_future_pose(path_points,object_pose,path_point_index,error_radius,target
     goal_point[2] = theta_target
 
     next_pose = interpolatio_compute_next_obj_pose(object_pose,torch.tensor(goal_point),push_step_dict)
+    next_pose[2] = object_pose[2]
 
     return next_pose , path_point_index
 
@@ -478,9 +531,12 @@ def pcd_downsample(points, num_samples=1024):
 
     return points_output
 
-def process_object_pointcloud(obstacle_pcds):
+def process_object_pointcloud(pcds,pcd_fusion_tool = None,num_samples=1024):
+    if pcd_fusion_tool is not None:
+        pcds = torch.tensor(pcds).to('cuda')
+        pcds = pcd_fusion_tool.filter_point(pcds,threshold=0.2).cpu().numpy()
 
-    output_pointcloud = pcd_downsample(obstacle_pcds,num_samples=1024)
+    output_pointcloud = pcd_downsample(pcds,num_samples=num_samples)
     return output_pointcloud
 
 
@@ -718,7 +774,46 @@ def convert_action_use(ps_pose,pe_pose,robot_theta_y):
     if pe_pose[2]< 0.74:
         pe_pose[2] = 0.75
 
-    return ps_pose ,pe_pose
+
+    ps_pose_m = Pose()
+    ps_pose_m.position.x = ps_pose[0]
+    ps_pose_m.position.y = ps_pose[1]
+    ps_pose_m.position.z = ps_pose[2]
+    ps_pose_m.orientation.w = ps_pose[3]
+    ps_pose_m.orientation.x = ps_pose[4]
+    ps_pose_m.orientation.y = ps_pose[5]
+    ps_pose_m.orientation.z = ps_pose[6]
+
+    pe_pose_m = Pose()
+    pe_pose_m.position.x = pe_pose[0]
+    pe_pose_m.position.y = pe_pose[1]
+    pe_pose_m.position.z = pe_pose[2]
+    pe_pose_m.orientation.w = pe_pose[3]
+    pe_pose_m.orientation.x = pe_pose[4]
+    pe_pose_m.orientation.y = pe_pose[5]
+    pe_pose_m.orientation.z = pe_pose[6]
+
+    # Set for test
+    ps_pose_m = Pose()
+    ps_pose_m.position.x = -1.7
+    ps_pose_m.position.y = 0.7
+    ps_pose_m.position.z = 0.8
+    ps_pose_m.orientation.w = 1
+    ps_pose_m.orientation.x = 0
+    ps_pose_m.orientation.y = 0
+    ps_pose_m.orientation.z = 0
+
+    pe_pose_m = Pose()
+    pe_pose_m.position.x = -1.7
+    pe_pose_m.position.y = 0.7
+    pe_pose_m.position.z = 0.6
+    pe_pose_m.orientation.w = 1
+    pe_pose_m.orientation.x = 0
+    pe_pose_m.orientation.y = 0
+    pe_pose_m.orientation.z = 0
+
+
+    return ps_pose_m ,pe_pose_m
 
 
 
@@ -791,6 +886,7 @@ def test_fetch_motion_plan(fetch,current_state,target_pose):
 
     # Get current base position
     current_base = current_state['current_base']
+    print('current_base',current_base)
 
     # Step 1: Solve whole-body IK
     ik_solution = fetch.solve_whole_body_ik(target_pose, max_attempts=100, manipulation_radius=1.0, normalized_arm_seed=None)
@@ -813,8 +909,8 @@ def test_fetch_motion_plan(fetch,current_state,target_pose):
     
     # Step 3: Get the last pose
     last_state = dict()
-    last_state['current_joints'] = plan_result['arm_path'][-1]
-    last_state['current_base'] = plan_result['base_configs'][-1]
+    last_state['current_joints'] = plan_result['arm_path'][len(plan_result['arm_path'])-1].to_list() # Need to select the latest; YZY
+    last_state['current_base'] = plan_result['base_configs'][len(plan_result['base_configs'])-1]
 
     return last_state, plan_result
 
@@ -846,6 +942,7 @@ def test_cartesian_interpolated_motion(fetch,current_state ,target_ee_pose, dura
     current_full_config = current_state['current_joints']
 
     # Get EE pose in robot base frame from FK
+    print('current_full_config',current_full_config)
     current_ee_pos_base, current_ee_quat_base = fetch.vamp_module.eefk(
         current_full_config
     )
@@ -861,8 +958,8 @@ def test_cartesian_interpolated_motion(fetch,current_state ,target_ee_pose, dura
         current_ee_quat_base,
     )
 
-    target_ee_pos_world = target_ee_pose[:3]
-    target_ee_quat_world = target_ee_pose[3:]
+    target_ee_pos_world = np.array([target_ee_pose.position.x,target_ee_pose.position.y,target_ee_pose.position.z])
+    target_ee_quat_world = np.array([target_ee_pose.orientation.x,target_ee_pose.orientation.y,target_ee_pose.orientation.z,target_ee_pose.orientation.w])
 
     # Create SLERP interpolator for orientation
     key_rots = R.from_quat([current_ee_quat_world, target_ee_quat_world])
@@ -873,6 +970,7 @@ def test_cartesian_interpolated_motion(fetch,current_state ,target_ee_pose, dura
     alphas = np.linspace(0, 1, num_waypoints)
     joint_trajectory = []
     seed = current_full_config  # Progressive seeding for smooth IK solutions (includes torso)
+
 
     for i, alpha in enumerate(alphas):
         # Interpolate position (linear) and orientation (SLERP)
@@ -903,9 +1001,14 @@ def test_cartesian_interpolated_motion(fetch,current_state ,target_ee_pose, dura
         # Update seed for next iteration (progressive seeding)
         seed = ik_solution
 
-    # To be processed; YZY
+    # joint_trajectory is 8D
+    # Step 3: Get the last pose
+    last_state = dict()
+    last_state['current_joints'] = joint_trajectory[len(joint_trajectory)-1] # Need to select the latest; YZY
+    last_state['current_base'] = current_state['current_base']
 
-    return joint_trajectory
+
+    return last_state,joint_trajectory
 
 
 def move_base_to_target(fetch,target_base_pose):
@@ -943,13 +1046,11 @@ def move_base_to_target(fetch,target_base_pose):
 
 
 
-def collect_and_segmented_pcd(simulation_control,topic,fetch,image_seg_tool):
+def collect_and_segmented_pcd(simulation_control,topic,fetch,image_seg_tool,pcd_fusion_tool):
     """
     collect_and_segmented_pcd 的 Docstring:
         获得障碍物与物体的点云。
     """
-    all_pointcloud = []
-    pcd_fusion_tool =  Points_fusion_tool()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Get the camera psoe
@@ -961,52 +1062,46 @@ def collect_and_segmented_pcd(simulation_control,topic,fetch,image_seg_tool):
     intrinsic_topic = topic[2]
     rgb, depth , cam2world, intrinsic_cv = simulation_control.get_rgb_depth(rgb_topic= rgb_topic,depth_topic= depth_topic,
                                                                             intrinsic_topic = intrinsic_topic, camera_pose = camera_pose)
-    # # Get the chair mask
-    # green_mask = (rgb[:, :, 1] > 130) & (rgb[:, :, 0] < 60) & (rgb[:, :, 2] < 60)
-    # green_points = np.argwhere(green_mask) # shape(N,2)
-    # chosen_indices = np.random.choice(len(green_points), size=3, replace=False)
-    # # 返回这两个点的位置 (row, col)
-    # position = green_points[chosen_indices]
-    # labels = np.array([1,1,1])
-    # # Use sam2 to get the mask of target object
-    # position[:,[0,1]] = position[:,[1,0]]
-    # mask_data = generate_segmentation_mask(rgb, position, labels)
+
     mask_data = image_seg_tool.segment_image_by_click(rgb)
     segmentation = torch.tensor(mask_data).squeeze().to(device)
 
-    import cv2
-    # 假设你已有：
-    # rgb: (H, W, 3), uint8, RGB 格式
-    # segmenation: (H, W), bool 或 0/1 的 tensor/array
-    # 1. 确保 segmentation 是 NumPy 数组且为布尔或 0/1
-    if isinstance(segmentation, torch.Tensor):
-        seg_mask = segmentation.cpu().numpy()
-    else:
-        seg_mask = segmentation
-    # 转为布尔（如果还不是）
-    seg_mask = seg_mask.astype(bool)
-    # 2. 创建一个彩色 overlay（例如红色高亮）
-    overlay = rgb.copy()  # 在副本上操作
-    # 设置 mask 区域为红色（注意：rgb 是 RGB 格式！）
-    # 所以红色 = [255, 0, 0]
-    overlay[seg_mask] = [255, 0, 0]  # R=255, G=0, B=0 → 纯红
-    # 3. （推荐）使用半透明融合，更美观
-    alpha = 0.5  # 透明度：0~1，越小越透明
-    output = rgb.copy()
-    output[seg_mask] = (alpha * np.array([255, 0, 0]) + (1 - alpha) * output[seg_mask]).astype(np.uint8)
-    # 4. 如果要用 OpenCV 显示，需转为 BGR
-    output_bgr = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
-    # 5. 显示
-    cv2.imshow("Segmentation Overlay", output_bgr)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-    print(cam2world)
+    # import cv2
+    # # 假设你已有：
+    # # rgb: (H, W, 3), uint8, RGB 格式
+    # # segmenation: (H, W), bool 或 0/1 的 tensor/array
+    # # 1. 确保 segmentation 是 NumPy 数组且为布尔或 0/1
+    # if isinstance(segmentation, torch.Tensor):
+    #     seg_mask = segmentation.cpu().numpy()
+    # else:
+    #     seg_mask = segmentation
+    # # 转为布尔（如果还不是）
+    # seg_mask = seg_mask.astype(bool)
+    # # 2. 创建一个彩色 overlay（例如红色高亮）
+    # overlay = rgb.copy()  # 在副本上操作
+    # # 设置 mask 区域为红色（注意：rgb 是 RGB 格式！）
+    # # 所以红色 = [255, 0, 0]
+    # overlay[seg_mask] = [255, 0, 0]  # R=255, G=0, B=0 → 纯红
+    # # 3. （推荐）使用半透明融合，更美观
+    # alpha = 0.5  # 透明度：0~1，越小越透明
+    # output = rgb.copy()
+    # output[seg_mask] = (alpha * np.array([255, 0, 0]) + (1 - alpha) * output[seg_mask]).astype(np.uint8)
+    # # 4. 如果要用 OpenCV 显示，需转为 BGR
+    # output_bgr = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
+    # # 5. 显示
+    # cv2.imshow("Segmentation Overlay", output_bgr)
+    # cv2.waitKey(0)
+    # cv2.destroyAllWindows()
+
     # Add parameters to Points_fusion_tool
     cam2world_para = torch.tensor(cam2world).view(4,4).to(device).to(torch.float)
     camera_intrinsic_para = torch.tensor(intrinsic_cv).view(3,3).to(device).to(torch.float)
-    # pcd_fusion_tool.cam2world.append(cam2world_para.clone())
-    # pcd_fusion_tool.intrinsic.append(camera_intrinsic_para.clone())
-    # pcd_fusion_tool.mask.append(segmentation.clone())
+    camera_extrinsic_para = torch.linalg.inv(cam2world_para)
+
+    # Add parameters to Points_fusion_tool
+    pcd_fusion_tool.extrinsic.append(camera_extrinsic_para)
+    pcd_fusion_tool.intrinsic.append(camera_intrinsic_para)
+    pcd_fusion_tool.mask.append(segmentation.clone().to(device))
 
     # Acquire the pointcloud in world frame
     depth_tensor = torch.tensor(depth).squeeze().to(device).clone()
@@ -1024,9 +1119,9 @@ def collect_and_segmented_pcd(simulation_control,topic,fetch,image_seg_tool):
 
 
 
-def pointcloud_segmentation_fusion_by_video(rgb_list,depth_list,intrinsics_list,camera_pose_list,video_seg_tool,itr_plan,first_prompt):
+def pointcloud_segmentation_fusion_by_video(rgb_list,depth_list,intrinsics_list,camera_pose_list,video_seg_tool,itr_plan,first_prompt,source_obj_pcd):
     # Save the rgb-image to video-dir
-    video_dir = os.path.join('push_policy/segmentation/rgb_video',str(itr_plan))
+    video_dir = os.path.join('segmentation/rgb_video',str(itr_plan))
     os.makedirs(video_dir, exist_ok=True)
     for idx, rgb in enumerate(rgb_list):
         if not isinstance(rgb, np.ndarray):
@@ -1050,4 +1145,51 @@ def pointcloud_segmentation_fusion_by_video(rgb_list,depth_list,intrinsics_list,
     # Get taget rgb mask from video
     video_seg_tool.init_model_state(video_dir)
     if itr_plan == 1:
-        video_segments = video_seg_tool.get_mask_from_video(prompt = first_prompt,frame_id =0)
+        mask = video_seg_tool.get_mask_from_video(prompt = first_prompt,frame_id =0)
+    else:
+        prompt = video_seg_tool.latest_prompt
+        mask = video_seg_tool.get_mask_from_video(prompt = prompt,frame_id =0)
+    device = video_seg_tool.device
+    segmentation = torch.tensor(mask).squeeze().to(device)
+
+    # Prepare camera parameters
+    cam2world = camera_pose_list[-1]
+    cam2world_para = torch.tensor(cam2world).view(4,4).to(device).to(torch.float)
+    intrinsic_cv = intrinsics_list[-1]
+    camera_intrinsic_para = torch.tensor(intrinsic_cv).view(3,3).to(device).to(torch.float)
+    # Prepare depth image
+    depth = depth_list[-1]
+    depth_tensor = torch.tensor(depth).squeeze().to(device).clone()
+
+    # Acquire the pointcloud in world frame
+    obj_pcd_wld_frame,obstacle_pcd_wld_frame = calculate_object_pointcloud_wld(depth = depth_tensor,intrinsic_cv = camera_intrinsic_para, 
+                                    cam2world = cam2world_para, mask = segmentation)
+    # Filter the object-points below a hight (The height of the table);
+    mask = obj_pcd_wld_frame[:, 2] >= 0.735
+    filtered_wld_frame_points = obj_pcd_wld_frame[mask]
+
+    # Filter the obstacle-points;
+    mask = obstacle_pcd_wld_frame[:, 2] >= 0.75
+    filtered_obstacle_pcd_wld_frame = obstacle_pcd_wld_frame[mask]
+
+    return filtered_wld_frame_points.cpu().numpy(), filtered_obstacle_pcd_wld_frame.cpu().numpy()
+
+
+def convert_source_pcd_to_current(source_pcd,source_pose,current_pose):
+    # Construt the source pose matrix
+    rotation_matrix_source = quat2mat(source_pose[3:])
+    T_source_pose = np.eye(4) 
+    T_source_pose[:3, :3] = rotation_matrix_source  # Rotation
+    T_source_pose[:3, 3] = source_pose[:3]     # Translation
+
+    # Construt the current pose matrix
+    rotation_matrix_source = quat2mat(current_pose[3:].numpy())
+    T_current_pose = np.eye(4) 
+    T_current_pose[:3, :3] = rotation_matrix_source  # Rotation
+    T_current_pose[:3, 3] = current_pose[:3].numpy()     # Translation
+
+    N = source_pcd.shape[0]
+    T = T_current_pose @ np.linalg.inv(T_source_pose)
+    new_pointcloud = (T @ np.hstack([source_pcd, np.ones((N, 1))]).T).T[:, :3]
+
+    return new_pointcloud

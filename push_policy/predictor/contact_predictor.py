@@ -88,9 +88,6 @@ class contact_predictor:
         pred_contact_np = torch.sigmoid(pred_contact[0]).cpu().detach().numpy()
         # Get the max value index
         max_index = self.select_contact_point(current_pc_nrd.copy(),pred_contact_np.squeeze(),pred_orientation_np.copy())
-        # max_index = self.noly_critic_select_point(current_pc_nrd = current_pc_nrd.copy(),pred_orientation_np = pred_orientation_np.copy(),
-        #                                           local_frame_future_pose = local_frame_future_pose.copy())
-        # max_index = np.argmax(pred_contact_np.squeeze())
 
         # Get the output shape
         output_contact = current_pc[max_index]
@@ -111,6 +108,7 @@ class contact_predictor:
             future_pc = trimesh.transform_points(current_pc_nrd, T_final)  # 使用 trimesh 的变换函数
             # Save path
             save_path = os.path.join(args.vis_dir,time_name,traj_id,str(itr_push)+"_push")
+            print(save_path)
             self.vis_dir = visulize_pred_results(current_pc_np = current_pc_nrd,future_pc_np =future_pc,
                                   pred_contact_np = pred_contact_np, pred_orientation_np =pred_orientation_np, push_idx = max_index,
                                   pred_push_distance_np = pred_push_distance_np,save_path = save_path, logger = self.logger)

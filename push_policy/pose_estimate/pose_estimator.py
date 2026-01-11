@@ -12,7 +12,6 @@ class Pose_Estimator():
         self.source_pcd.points = o3d.utility.Vector3dVector(source_pcd_wld[:,:3])
 
         self.starting_pose = ori_pose
-        self.starting_pose[2] = 0
 
         self.diff_transformation = self._calculate_transforamtion_from_ori_PCA_frame_2_ori_pose(original_PCA_frame_pose)
 

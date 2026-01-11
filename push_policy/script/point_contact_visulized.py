@@ -81,8 +81,15 @@ def vis_ply_pcd(path):
 
 def main():
 
-    path = 'visualizations/difficult_model_100_seed_66_wd1_ds1_set_1_repeat_1_only_actor/test7/20251208_131220.1/traj_3/10_push/pred_single_result.ply'
-    vis_ply_pcd(path)
+    # path = 'push_policy/visualizations/test_yzy/0/1_push/pred_single_result.ply'
+    # vis_ply_pcd(path)
+
+    from transforms3d.euler import euler2quat,quat2euler
+    quat_wxyz = euler2quat([0,np.pi/2,0])
+    print(quat_wxyz)
+
+    euler = quat2euler()
+
 
 
 if __name__ == "__main__":

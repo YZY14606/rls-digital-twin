@@ -79,7 +79,7 @@ class Video_sam_tool():
         self.inference_state = None
         self.ann_obj_id = 1
 
-        self.latest_prompt = None
+        self.latest_prompt = {}
 
         if mask_generator_type == "video":
             self.predictor = self._load_predictor()
@@ -175,9 +175,6 @@ class Video_sam_tool():
 
         # 简单随机抽样（不足则允许重复）
         rng = np.random.default_rng()
-
-        pos_n = min(3, xs_pos.size)
-        neg_n = min(3, xs_neg.size)
 
         if xs_pos.size == 0:
             raise ValueError("mask 为空，无法选正点")

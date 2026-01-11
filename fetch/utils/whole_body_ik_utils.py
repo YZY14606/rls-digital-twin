@@ -246,24 +246,104 @@ def find_valid_base_positions_from_point(
 
     return valid_positions
 
-def _generate_base_seed(
-    pose, costmap, costmap_metadata, manipulation_radius, cost_threshold=0.3
-):
-    """Generates a base seed [x, y, theta] by finding a valid base position."""
-    valid_positions = find_valid_base_positions(
-        pose, costmap, costmap_metadata, manipulation_radius, cost_threshold
-    )
 
-    if not valid_positions:
-        rospy.logwarn("No valid base positions found for seed generation")
+def _generate_base_seed(
+    pose,
+    costmap,
+    costmap_metadata,
+    manipulation_radius,
+    cost_threshold=0.9,
+):
+    """
+    Generate a base seed [x, y, theta] by probabilistic sampling
+    from a 2D costmap. Lower cost cells have higher probability.
+    """
+
+    if costmap is None or costmap_metadata is None:
+        rospy.logwarn("Costmap or metadata is None")
         return None
 
-    # Sort positions by cost (lower is better) and pick the best one
-    sorted_positions = sorted(valid_positions, key=lambda pos: pos[2])
-    best_position = sorted_positions[0]
+    # Target position (world frame)
+    target_xy = np.array([
+        pose.position.x,
+        pose.position.y
+    ])
 
-    # Return x, y, theta
-    return [best_position[0], best_position[1], best_position[3]]
+
+    height = costmap_metadata["height"]
+    width = costmap_metadata["width"]
+    resolution = costmap_metadata["resolution"]
+    origin_x = costmap_metadata["origin_x"]
+    origin_y = costmap_metadata["origin_y"]
+
+    # Build grid → world coordinates
+    grid_y, grid_x = np.mgrid[0:height, 0:width]
+    world_x = origin_x + grid_x * resolution
+    world_y = origin_y + grid_y * resolution
+    world_coords = np.stack([world_x, world_y], axis=0)
+
+    # Distance mask (manipulation radius)
+    distances = np.linalg.norm(
+        world_coords - target_xy[:, np.newaxis, np.newaxis], axis=0
+    )
+    radius_mask = distances <= manipulation_radius
+
+    # Prepare costmap
+    search_costs = np.asarray(costmap, dtype=float).copy()
+    search_costs[~np.isfinite(search_costs)] = 1.0
+    search_costs = np.clip(search_costs, 0.0, 1.0)
+
+    # Invalidate occupied or out-of-radius cells
+    search_costs[search_costs >= cost_threshold] = 1.0
+    search_costs[~radius_mask] = 1.0
+
+    # Convert cost → probability
+    probabilities = 1.0 - search_costs
+    probabilities[probabilities < 0] = 0.0
+    probabilities = probabilities ** 2  # sharpen distribution
+
+    prob_sum = probabilities.sum()
+    if prob_sum <= 1e-6:
+        rospy.logwarn("No valid base positions found (probability sum ~ 0)")
+        return None
+
+    probabilities /= prob_sum
+
+    # Random sampling
+    flat_probs = probabilities.flatten()
+    chosen_index = np.random.choice(flat_probs.size, p=flat_probs)
+    gy, gx = np.unravel_index(chosen_index, probabilities.shape)
+
+    # Grid → world
+    base_x = origin_x + gx * resolution
+    base_y = origin_y + gy * resolution
+    base_xy = np.array([base_x, base_y])
+
+    # Face the target
+    direction = target_xy - base_xy
+    yaw = np.arctan2(direction[1], direction[0])
+
+    return [base_x, base_y, yaw]
+
+
+# def _generate_base_seed(
+#     pose, costmap, costmap_metadata, manipulation_radius, cost_threshold=0.3
+# ):
+#     """Generates a base seed [x, y, theta] by finding a valid base position."""
+#     valid_positions = find_valid_base_positions(
+#         pose, costmap, costmap_metadata, manipulation_radius, cost_threshold
+#     )
+
+#     if not valid_positions:
+#         rospy.logwarn("No valid base positions found for seed generation")
+#         return None
+
+#     # Sort positions by cost (lower is better) and pick the best one
+#     sorted_positions = sorted(valid_positions, key=lambda pos: pos[2])
+#     best_position = sorted_positions[0]
+
+#     # Return x, y, theta
+#     return [best_position[0], best_position[1], best_position[3]]
 
 def _generate_arm_seed(lower_limits, upper_limits, normalized_arm_seed=None):
     """

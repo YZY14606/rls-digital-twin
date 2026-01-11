@@ -3,9 +3,9 @@ import numpy as np
 
 class PointSelector:
     def __init__(self, image_path = None, rgb = None):
-        if image_path ==None and rgb != None:
+        if image_path is None and rgb is not None:
             self.image = rgb
-        elif image_path !=None and rgb == None:
+        elif image_path is not None and rgb is None:
             self.image = cv2.imread(image_path)
         else:
             print('Image loading error!')

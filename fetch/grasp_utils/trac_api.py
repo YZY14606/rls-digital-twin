@@ -16,7 +16,7 @@ def _default_urdf_path() -> str:
     # Resolve to project resources path: <repo_root>/resources/fetch_ext/fetch ext.urdf
     here = os.path.dirname(__file__)
     # Go up three levels from grasp_anywhere/robot/ik -> repo root
-    repo_root = os.path.normpath(os.path.join(here, "..", "..", ".."))
+    repo_root = os.path.normpath(os.path.join(here, "..", ".."))
     return os.path.join(repo_root, "resources", "fetch_ext", "fetch ext.urdf")
 
 
@@ -43,7 +43,8 @@ def _auto_init_if_needed() -> None:
         # Floating base is optional; initialize as well for completeness
         trac_init_floating_base(urdf_string=urdf_str, urdf_path=None)
         _trac_auto_initialized = True
-    except Exception:
+    except Exception as e:
+        print(f'Error: {e}')
         # Defer initialization to explicit calls if automatic init fails
         _trac_auto_initialized = False
 
@@ -165,6 +166,7 @@ def trac_solve_fixed_base_arm(
     orientation_world_xyzw: List[float],
 ) -> Optional[List[float]]:
     _auto_init_if_needed()
+
     base_x, base_y, base_theta = base_config_xytheta
     T_world_base = transformations.euler_matrix(0, 0, base_theta)
     T_world_base[0:3, 3] = [base_x, base_y, 0]

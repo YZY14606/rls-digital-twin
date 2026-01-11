@@ -200,6 +200,7 @@ class WholeBodyIKSolver:
         all_time = time.time()
 
         while not is_valid and sample_count < max_attempts:
+
             sample_count += 1
             rospy.loginfo(f"IK attempt {sample_count}/{max_attempts}")
 
